@@ -1,0 +1,17 @@
+{
+  "name": "len-den",
+  "version": "1.0.0",
+  "description": "Len Den - Nepali business management (khata) app, a working clone of Karobar",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test/ui-test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.5.0"
+  }
+}

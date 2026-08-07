@@ -1,0 +1,8 @@
+node_modules/
+data/
+*.log
+*.db
+*.db-wal
+*.db-shm
+test/*.png
+.DS_Store
