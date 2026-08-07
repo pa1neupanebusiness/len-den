@@ -24,11 +24,10 @@
         <button class="nav-item" data-view="items"><span class="ico">📦</span> Inventory</button>
         <button class="nav-item nav-parent" data-view="sales" data-expands="sales"><span class="ico">🧾</span> Sales<span class="caret">▾</span></button>
         <div class="nav-sub" id="sub-sales">
-          <button class="nav-item" data-view="sales"><span class="ico">🧾</span> Sales</button>
-          <button class="nav-item" data-view="sales_invoices"><span class="ico">📄</span> Sales Invoices</button>
-          <button class="nav-item" data-view="payment_in"><span class="ico">💵</span> Payment In</button>
-          <button class="nav-item" data-view="quotations"><span class="ico">📝</span> Quotations</button>
-          <button class="nav-item" data-view="sales_return"><span class="ico">↩️</span> Sales Return</button>
+          <button class="nav-item" data-view="sales_invoices"><span class="ico">📄</span> Create Sales Invoice</button>
+          <button class="nav-item" data-view="payment_in"><span class="ico">💵</span> Add Payment In</button>
+          <button class="nav-item" data-view="quotations"><span class="ico">📝</span> Create New Quotation</button>
+          <button class="nav-item" data-view="sales_return"><span class="ico">↩️</span> Create Sales Return</button>
         </div>
         <button class="nav-item nav-parent" data-view="purchase" data-expands="purchase"><span class="ico">🛒</span> Purchase<span class="caret">▾</span></button>
         <div class="nav-sub" id="sub-purchase">
@@ -40,7 +39,15 @@
         <button class="nav-item" data-view="other_income"><span class="ico">💰</span> Other Income</button>
         <button class="nav-item" data-view="accounts"><span class="ico">🏦</span> Manage Accounts</button>
         <div class="nav-section">Management</div>
-        <button class="nav-item" data-view="reports"><span class="ico">📈</span> Reports</button>
+        <button class="nav-item nav-parent" data-view="reports" data-expands="reports"><span class="ico">📈</span> Reports<span class="caret">▾</span></button>
+        <div class="nav-sub" id="sub-reports">
+          <button class="nav-item" data-view="reports"><span class="ico">🗂️</span> Browse Reports</button>
+          <button class="nav-item" data-view="report_cat_transactions"><span class="ico">🧾</span> Transactions</button>
+          <button class="nav-item" data-view="report_cat_parties"><span class="ico">👥</span> Parties</button>
+          <button class="nav-item" data-view="report_cat_inventory"><span class="ico">📦</span> Inventory</button>
+          <button class="nav-item" data-view="report_cat_income"><span class="ico">💰</span> Income Expense</button>
+          <button class="nav-item" data-view="report_cat_status"><span class="ico">🏢</span> Business Status</button>
+        </div>
         <button class="nav-item" data-view="staff"><span class="ico">🛡️</span> Manage Staffs</button>
         <button class="nav-item nav-parent" data-view="import_parties" data-expands="import"><span class="ico">📥</span> Import Data<span class="caret">▾</span></button>
         <div class="nav-sub" id="sub-import">
@@ -79,10 +86,6 @@
         <div>
           <div class="tb-title" id="tbTitle">Dashboard</div>
           <div style="font-size:12px;color:var(--text-tertiary);" id="tbDate"></div>
-        </div>
-        <div class="search-box" id="globalSearchWrap">
-          <span class="sico">🔍</span>
-          <input class="input" id="globalSearch" placeholder="Search..."/>
         </div>
       </div>
       <div id="view" class="page"></div>

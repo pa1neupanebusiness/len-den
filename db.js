@@ -206,10 +206,23 @@ if (!hasCol('transactions', 'discount')) db.exec('ALTER TABLE transactions ADD C
 if (!hasCol('transactions', 'vat_percent')) db.exec('ALTER TABLE transactions ADD COLUMN vat_percent REAL DEFAULT 0');
 if (!hasCol('transactions', 'reminder_date')) db.exec("ALTER TABLE transactions ADD COLUMN reminder_date TEXT DEFAULT ''");
 if (!hasCol('transactions', 'ref_no')) db.exec("ALTER TABLE transactions ADD COLUMN ref_no TEXT DEFAULT ''");
+if (!hasCol('users', 'email')) db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''");
+if (!hasCol('users', 'google_id')) db.exec("ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''");
 
 /* Backfill transaction reference numbers. */
 db.exec(`UPDATE transactions SET ref_no = (SELECT COALESCE(b.invoice_prefix,'INV') FROM businesses b WHERE b.id = transactions.business_id) || '-' || printf('%06d', transactions.id)
   WHERE ref_no IS NULL OR ref_no = '';`);
+
+db.exec(`CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  type TEXT DEFAULT 'task',
+  done INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+);`);
 
 function begin() {
   db.exec('BEGIN');

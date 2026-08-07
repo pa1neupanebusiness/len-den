@@ -10,6 +10,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const otpStore = new Map(); // phone -> { otp, expires }
+const googleStateStore = new Map(); // state -> { expires }
 
 function newToken() {
   return crypto.randomBytes(24).toString('hex');
@@ -94,6 +95,100 @@ app.post('/api/auth/logout', auth(), (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token = ?').run(req.token);
   setCookie(res, 'ld_token', '', 0);
   res.json({ ok: true });
+});
+
+/* Google OAuth */
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+
+function googleRedirectUri(req) {
+  const base = (process.env.APP_URL || '').replace(/\/$/, '');
+  return (base || (req.headers['x-forwarded-proto'] || req.protocol) + '://' + req.get('host')) + '/api/auth/google/callback';
+}
+
+app.get('/api/auth/google', (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return res.status(400).json({ error: 'Google sign in is not configured yet. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.' });
+  const state = crypto.randomBytes(16).toString('hex');
+  googleStateStore.set(state, { expires: Date.now() + 10 * 60 * 1000 });
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: googleRedirectUri(req),
+    response_type: 'code',
+    scope: 'openid email profile',
+    state,
+    prompt: 'select_account',
+  });
+  res.redirect('https://accounts.google.com/o/oauth2/v2/auth?' + params.toString());
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  if (error) {
+    return res.redirect('/login?error=' + encodeURIComponent('Google sign in was cancelled or failed: ' + error));
+  }
+  const saved = state ? googleStateStore.get(String(state)) : null;
+  if (!saved || Date.now() > saved.expires) return res.status(400).send('Google sign in expired. Please try again.');
+  googleStateStore.delete(String(state));
+  if (!code) return res.status(400).send('Missing authorization code.');
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) return res.status(400).send('Google sign in is not configured on the server.');
+
+  try {
+    const tokRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: googleRedirectUri(req),
+        grant_type: 'authorization_code',
+      }),
+    });
+    const tok = await tokRes.json();
+    if (!tokRes.ok || !tok.access_token) throw new Error(tok.error_description || tok.error || 'Token exchange failed');
+
+    const infoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: 'Bearer ' + tok.access_token },
+    });
+    const g = await infoRes.json();
+    if (!g.sub) throw new Error('Could not fetch Google profile.');
+
+    const email = (g.email || '').toLowerCase();
+    const name = g.name || (email ? email.split('@')[0] : 'Owner');
+
+    let user = db.prepare('SELECT * FROM users WHERE google_id = ?').get(String(g.sub));
+    if (!user && email) user = db.prepare('SELECT * FROM users WHERE email = ? AND email != \'\'').get(email);
+
+    if (!user) {
+      begin();
+      try {
+        const bizRes = db.prepare('INSERT INTO businesses (name, phone) VALUES (?, ?)').run(name + ' Business', '');
+        const bizId = bizRes.lastInsertRowid;
+        const uRes = db.prepare('INSERT INTO users (business_id, phone, name, role, is_owner, email, google_id) VALUES (?,?,?,?,1,?,?)')
+          .run(bizId, '', name, 'owner', email, String(g.sub));
+        user = db.prepare('SELECT * FROM users WHERE id = ?').get(uRes.lastInsertRowid);
+        commit();
+      } catch (e) {
+        rollback();
+        throw new Error('Could not create account.');
+      }
+    } else {
+      if (!user.google_id) db.prepare('UPDATE users SET google_id = ? WHERE id = ?').run(String(g.sub), user.id);
+      if (email && !user.email) db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, user.id);
+      if (name && !user.name) db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, user.id);
+    }
+
+    const token = newToken();
+    db.prepare('INSERT INTO sessions (token, user_id) VALUES (?, ?)').run(token, user.id);
+    setCookie(res, 'ld_token', token, 60 * 60 * 24 * 30);
+    res.redirect('/');
+  } catch (e) {
+    res.status(500).send('Google sign in failed: ' + e.message);
+  }
+});
+
+app.get('/api/auth/me', auth(), (req, res) => {
+  res.json({ ok: true, user: req.user, business: req.business });
 });
 
 app.get('/api/me', auth(), (req, res) => {
@@ -425,6 +520,190 @@ app.get('/api/reports', auth(), (req, res) => {
   res.json({ from, to, byType, profit, vat: vatRow.vat, discount: discountRow.discount, topItems, topCustomers, expenseByNote });
 });
 
+/* ---------------- Report views ---------------- */
+
+app.get('/api/report/:slug', auth(), (req, res) => {
+  const bid = req.business.id;
+  const { slug } = req.params;
+  const { from, to, date, party_id, item_id } = req.query;
+
+  const tWhere = ['t.business_id=?'];
+  const tP = [bid];
+  if (from) { tWhere.push('t.date>=?'); tP.push(from); }
+  if (to) { tWhere.push('t.date<=?'); tP.push(to); }
+  if (party_id) { tWhere.push('t.party_id=?'); tP.push(Number(party_id)); }
+  if (item_id) { tWhere.push('t.item_id=?'); tP.push(Number(item_id)); }
+
+  const allTypes = ['sale', 'purchase', 'expense', 'other_income', 'payment_in', 'payment_out', 'sales_return', 'purchase_return'];
+  const rows = (types, extraWhere, extraP) => {
+    const w = [...tWhere, `t.type IN (${types.map(() => '?').join(',')})`, ...(extraWhere || [])];
+    const p = [...tP, ...types, ...(extraP || [])];
+    return {
+      rows: db.prepare(`SELECT t.*, p.name party_name, i.name item_name, i.unit item_unit
+        FROM transactions t LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+        WHERE ${w.join(' AND ')} ORDER BY t.date ASC, t.id ASC`).all(...p),
+      sums: db.prepare(`SELECT COUNT(*) c, COALESCE(SUM(t.amount),0) amt,
+          COALESCE(SUM(CASE WHEN t.type IN ('sale','payment_in','other_income','purchase_return') THEN t.amount ELSE 0 END),0) inflow,
+          COALESCE(SUM(CASE WHEN t.type IN ('purchase','payment_out','expense','sales_return') THEN t.amount ELSE 0 END),0) outflow
+        FROM transactions t WHERE ${w.join(' AND ')}`).get(...p),
+    };
+  };
+  const joined = (w, p, extraCols) => db.prepare(`SELECT t.*, p.name party_name, i.name item_name, i.unit item_unit ${extraCols || ''}
+    FROM transactions t LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+    WHERE ${w.join(' AND ')} ORDER BY t.date ASC, t.id ASC`).all(...p);
+
+  switch (slug) {
+    case 'transaction':
+    case 'all_transactions': {
+      const d = rows(allTypes);
+      return res.json({ ...d.sums, rows: d.rows });
+    }
+    case 'sales': { const d = rows(['sale']); return res.json({ ...d.sums, rows: d.rows }); }
+    case 'purchase': { const d = rows(['purchase']); return res.json({ ...d.sums, rows: d.rows }); }
+    case 'sales_return': { const d = rows(['sales_return']); return res.json({ ...d.sums, rows: d.rows }); }
+    case 'purchase_return': { const d = rows(['purchase_return']); return res.json({ ...d.sums, rows: d.rows }); }
+    case 'cash': {
+      const d = rows(allTypes, ["(t.payment_method='' OR t.payment_method='Cash')"]);
+      return res.json({ ...d.sums, rows: d.rows });
+    }
+    case 'bank': {
+      const d = rows(allTypes, ["t.payment_method='Bank'"]);
+      return res.json({ ...d.sums, rows: d.rows });
+    }
+    case 'profit_loss': {
+      const row = db.prepare(`SELECT
+          COALESCE(SUM(CASE WHEN t.type='sale' THEN t.amount ELSE 0 END),0) sale,
+          COALESCE(SUM(CASE WHEN t.type='other_income' THEN t.amount ELSE 0 END),0) other_income,
+          COALESCE(SUM(CASE WHEN t.type='purchase' THEN t.amount ELSE 0 END),0) purchase,
+          COALESCE(SUM(CASE WHEN t.type='expense' THEN t.amount ELSE 0 END),0) expense,
+          COALESCE(SUM(CASE WHEN t.type='sales_return' THEN t.amount ELSE 0 END),0) sales_return,
+          COALESCE(SUM(CASE WHEN t.type='purchase_return' THEN t.amount ELSE 0 END),0) purchase_return
+        FROM transactions t WHERE ${tWhere.join(' AND ')}`).get(...tP);
+      return res.json(row);
+    }
+    case 'income_expense': {
+      const row = db.prepare(`SELECT
+          COALESCE(SUM(CASE WHEN t.type IN ('sale','other_income','purchase_return') THEN t.amount ELSE 0 END),0) income,
+          COALESCE(SUM(CASE WHEN t.type IN ('purchase','expense','sales_return') THEN t.amount ELSE 0 END),0) expense,
+          COALESCE(SUM(CASE WHEN t.type='payment_in' THEN t.amount ELSE 0 END),0) received,
+          COALESCE(SUM(CASE WHEN t.type='payment_out' THEN t.amount ELSE 0 END),0) paid
+        FROM transactions t WHERE ${tWhere.join(' AND ')}`).get(...tP);
+      return res.json(row);
+    }
+    case 'expense_category':
+    case 'income_category': {
+      const typ = slug === 'expense_category' ? 'expense' : 'other_income';
+      const w = [...tWhere, 't.type=?'];
+      const p = [...tP, typ];
+      const rows = db.prepare(`SELECT COALESCE(NULLIF(t.note,''),'General') name, COUNT(*) c, SUM(t.amount) amt
+        FROM transactions t WHERE ${w.join(' AND ')} GROUP BY COALESCE(NULLIF(t.note,''),'General') ORDER BY amt DESC`).all(...p);
+      return res.json({ rows, total: rows.reduce((s, r) => s + r.amt, 0) });
+    }
+    case 'all_parties': {
+      const parties = db.prepare('SELECT * FROM parties WHERE business_id=? ORDER BY name COLLATE NOCASE').all(bid).map(p => {
+        const t = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type IN ('sale','purchase') THEN amount WHEN type IN ('payment_in','payment_out','sales_return','purchase_return') THEN -amount ELSE 0 END),0) v FROM transactions WHERE business_id=? AND party_id=?`).get(bid, p.id).v;
+        const balance = Math.round((p.opening_balance + t) * 100) / 100;
+        return { ...p, balance };
+      });
+      const customers = parties.filter(p => p.type === 'customer');
+      const suppliers = parties.filter(p => p.type === 'supplier');
+      return res.json({
+        customers, suppliers,
+        receivable: customers.reduce((s, p) => s + Math.max(p.balance, 0), 0),
+        payable: suppliers.reduce((s, p) => s + Math.max(p.balance, 0), 0),
+      });
+    }
+    case 'item_list': {
+      const tCond = tWhere.join(' AND ');
+      const items = db.prepare(`SELECT i.*,
+          COALESCE(SUM(CASE WHEN t.type='sale' THEN t.quantity ELSE 0 END),0) sold_qty,
+          COALESCE(SUM(CASE WHEN t.type='sale' THEN t.amount ELSE 0 END),0) sold_amt,
+          COALESCE(SUM(CASE WHEN t.type='purchase' THEN t.quantity ELSE 0 END),0) bought_qty,
+          COALESCE(SUM(CASE WHEN t.type='purchase' THEN t.amount ELSE 0 END),0) bought_amt
+        FROM items i LEFT JOIN transactions t ON t.item_id=i.id AND ${tCond}
+        WHERE i.business_id=? GROUP BY i.id ORDER BY i.name COLLATE NOCASE`).all(...tP, bid);
+      return res.json({ items });
+    }
+    case 'low_stock': {
+      const items = db.prepare("SELECT * FROM items WHERE business_id=? AND low_stock>0 AND stock<=low_stock ORDER BY (stock-low_stock) ASC, name COLLATE NOCASE").all(bid);
+      return res.json({ items });
+    }
+    case 'stock_qty': {
+      const tCond = tWhere.join(' AND ');
+      const items = db.prepare(`SELECT i.id, i.name, i.unit, i.stock closing,
+          COALESCE(SUM(CASE WHEN t.type IN ('purchase','sales_return') THEN t.quantity ELSE 0 END),0) bought,
+          COALESCE(SUM(CASE WHEN t.type IN ('sale','purchase_return') THEN t.quantity ELSE 0 END),0) sold,
+          COALESCE(SUM(CASE WHEN t.type IN ('purchase','sales_return') THEN t.amount ELSE 0 END),0) bought_amt,
+          COALESCE(SUM(CASE WHEN t.type IN ('sale','purchase_return') THEN t.amount ELSE 0 END),0) sold_amt
+        FROM items i LEFT JOIN transactions t ON t.item_id=i.id AND ${tCond}
+        WHERE i.business_id=? GROUP BY i.id ORDER BY i.name COLLATE NOCASE`).all(...tP, bid).map(r => ({ ...r, opening: Math.round((r.closing - r.bought + r.sold) * 100) / 100 }));
+      return res.json({ items });
+    }
+    case 'discount': {
+      const w = [...tWhere, "t.type IN ('sale','purchase')", 't.discount > 0'];
+      const rows = db.prepare(`SELECT p.name, p.type ptype, COUNT(*) c, SUM(t.discount) discount, SUM(t.amount) amt
+        FROM transactions t JOIN parties p ON p.id=t.party_id
+        WHERE ${w.join(' AND ')} GROUP BY t.party_id ORDER BY discount DESC`).all(...tP);
+      return res.json({ rows, total: rows.reduce((s, r) => s + r.discount, 0) });
+    }
+    case 'tax_sales':
+    case 'tax_purchase': {
+      const typ = slug === 'tax_sales' ? 'sale' : 'purchase';
+      const w = [...tWhere, 't.type=?', 't.vat_percent > 0'];
+      const p = [...tP, typ];
+      const s = db.prepare(`SELECT COUNT(*) c, COALESCE(SUM(t.amount),0) amt, COALESCE(SUM(t.amount * t.vat_percent / 100),0) vat FROM transactions t WHERE ${w.join(' AND ')}`).get(...p);
+      return res.json({ ...s, rows: joined(w, p) });
+    }
+    case 'party_statement': {
+      const pid = Number(party_id);
+      if (!pid) return res.json({ party: null, rows: [], opening: 0, closing: 0 });
+      const party = db.prepare('SELECT * FROM parties WHERE id=? AND business_id=?').get(pid, bid);
+      if (!party) return bad('Party not found')(res);
+      let opening = party.opening_balance;
+      if (from) {
+        const before = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type IN ('sale','purchase') THEN amount WHEN type IN ('payment_in','payment_out','sales_return','purchase_return') THEN -amount ELSE 0 END),0) v FROM transactions WHERE business_id=? AND party_id=? AND date < ?`).get(bid, pid, from).v;
+        opening = Math.round((party.opening_balance + before) * 100) / 100;
+      }
+      const w = [...tWhere, 't.party_id=?'];
+      const p = [...tP, pid];
+      const raw = db.prepare(`SELECT t.*, i.name item_name, i.unit item_unit FROM transactions t LEFT JOIN items i ON i.id=t.item_id
+        WHERE ${w.join(' AND ')} ORDER BY t.date ASC, t.id ASC`).all(...p);
+      let running = opening;
+      const lines = raw.map(r => {
+        const eff = balEffect(r.type);
+        const delta = eff === 'add' ? r.amount : (eff === 'sub' ? -r.amount : 0);
+        running = Math.round((running + delta) * 100) / 100;
+        return { ...r, delta, balance: running };
+      });
+      return res.json({ party, rows: lines, opening, closing: running });
+    }
+    case 'item_details': {
+      const iid = Number(item_id);
+      if (!iid) return res.json({ item: null, rows: [], opening: 0, closing: 0 });
+      const item = db.prepare('SELECT * FROM items WHERE id=? AND business_id=?').get(iid, bid);
+      if (!item) return bad('Item not found')(res);
+      const w = [...tWhere, 't.item_id=?'];
+      const p = [...tP, iid];
+      const rows = db.prepare(`SELECT t.*, p.name party_name FROM transactions t LEFT JOIN parties p ON p.id=t.party_id WHERE ${w.join(' AND ')} ORDER BY t.date ASC, t.id ASC`).all(...p);
+      const net = rows.reduce((s, r) => s + (stockMult(r.type) * r.quantity), 0);
+      return res.json({ item, rows, opening: Math.round((item.stock - net) * 100) / 100, closing: item.stock });
+    }
+    case 'daybook': {
+      const d = date || new Date().toISOString().slice(0, 10);
+      const rows = db.prepare(`SELECT t.*, p.name party_name, i.name item_name FROM transactions t
+        LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+        WHERE t.business_id=? AND t.date=? ORDER BY t.id`).all(bid, d);
+      const total = db.prepare(`SELECT
+          COALESCE(SUM(CASE WHEN t.type IN ('sale','payment_in','other_income','purchase_return') THEN t.amount ELSE 0 END),0) inflow,
+          COALESCE(SUM(CASE WHEN t.type IN ('purchase','payment_out','expense','sales_return') THEN t.amount ELSE 0 END),0) outflow
+        FROM transactions t WHERE t.business_id=? AND t.date=?`).get(bid, d);
+      return res.json({ date: d, rows, inflow: total.inflow, outflow: total.outflow });
+    }
+    default:
+      return bad('Unknown report')(res);
+  }
+});
+
 /* ---------------- Daybook ---------------- */
 
 app.get('/api/daybook', auth(), (req, res) => {
@@ -462,6 +741,44 @@ app.delete('/api/staff/:id', auth(), (req, res) => {
   if (!u) return bad('User not found')(res);
   if (u.is_owner) return bad('Cannot remove the owner')(res);
   db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+  res.json({ ok: true });
+});
+
+/* ---------------- Reminders ---------------- */
+
+const REMINDER_TYPES = ['task', 'payment', 'bill', 'meeting', 'birthday', 'followup', 'other'];
+
+app.get('/api/reminders', auth(), (req, res) => {
+  const reminders = db.prepare('SELECT * FROM reminders WHERE business_id=? ORDER BY done ASC, due_at ASC, id ASC').all(req.business.id);
+  res.json({ reminders });
+});
+
+app.post('/api/reminders', auth(), (req, res) => {
+  const { title, due_at, type } = req.body;
+  if (!title || !String(title).trim()) return bad('Title is required')(res);
+  if (!due_at) return bad('Date & time is required')(res);
+  const r = db.prepare('INSERT INTO reminders (business_id, title, due_at, type, done) VALUES (?,?,?,?,0)')
+    .run(req.business.id, String(title).trim(), String(due_at), REMINDER_TYPES.includes(type) ? type : 'task');
+  res.json({ ok: true, id: r.lastInsertRowid });
+});
+
+app.put('/api/reminders/:id', auth(), (req, res) => {
+  const old = db.prepare('SELECT * FROM reminders WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!old) return bad('Reminder not found')(res);
+  const title = req.body.title ?? old.title;
+  const due_at = req.body.due_at ?? old.due_at;
+  const type = req.body.type ?? old.type;
+  const done = req.body.done === undefined ? old.done : (req.body.done ? 1 : 0);
+  if (!String(title).trim()) return bad('Title is required')(res);
+  db.prepare('UPDATE reminders SET title=?, due_at=?, type=?, done=? WHERE id=?')
+    .run(String(title).trim(), String(due_at), REMINDER_TYPES.includes(type) ? type : old.type, done, old.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/reminders/:id', auth(), (req, res) => {
+  const old = db.prepare('SELECT * FROM reminders WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!old) return bad('Reminder not found')(res);
+  db.prepare('DELETE FROM reminders WHERE id=?').run(old.id);
   res.json({ ok: true });
 });
 

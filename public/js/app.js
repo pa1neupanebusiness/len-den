@@ -9,6 +9,12 @@ const state = {
   txnPage: 1,
   txnFilter: { type: '', party_id: '', item_id: '', from: '', to: '', q: '' },
   reportRange: 'week',
+  repFrom: rangeDays(30),
+  repTo: today(),
+  repDay: today(),
+  repQ: '',
+  repParty: '',
+  repItem: '',
   ledgerParty: null,
   partyTab: 'all',
   partyCat: '',
@@ -172,7 +178,7 @@ async function boot() {
   $('brandBiz').textContent = 'Len Den';
   $('brandSub').textContent = me.business.name;
   $('userName').textContent = me.user.name || (me.user.is_owner ? 'Owner' : 'Staff');
-  $('userPhone').textContent = '+977 ' + me.user.phone;
+  $('userPhone').textContent = me.user.phone ? '+977 ' + me.user.phone : (me.user.email || '');
   $('userAvatar').textContent = ($('userName').textContent || 'O')[0].toUpperCase();
   $('tbDate').textContent = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   $('logoutBtn').addEventListener('click', async () => {
@@ -204,12 +210,6 @@ function navBind() {
       route();
     });
   });
-  $('globalSearch').addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      state.txnFilter.q = e.target.value;
-      if (TX_VIEWS.includes(state.view)) route();
-    }
-  });
 }
 
 function setTitle(t) {
@@ -234,15 +234,14 @@ async function route() {
     const parent = $$('.nav-parent').find(el => el.dataset.expands === pid);
     if (parent) parent.classList.add('expanded');
   }
-  $('globalSearchWrap').classList.toggle('hidden', !TX_VIEWS.includes(v));
   try {
     if (v === 'dashboard') await renderDashboard();
     else if (v === 'khata') await renderKhata();
     else if (v === 'sales') await renderTypeView({ type: 'sale', title: 'Sales', label: 'Sale', partyType: 'customer', badge: ['Sale', 'success'] });
-    else if (v === 'sales_invoices') await renderTypeView({ type: 'sale', title: 'Sales Invoices', label: 'Sale', partyType: 'customer', badge: ['Invoice', 'success'], invoiceLabel: '🧾 Invoice' });
-    else if (v === 'payment_in') await renderTypeView({ type: 'payment_in', title: 'Payment In', label: 'Payment', partyType: 'customer', badge: ['Payment In', 'success'] });
+    else if (v === 'sales_invoices') await renderTypeView({ type: 'sale', title: 'Create Sales Invoice', label: 'Sales Invoice', partyType: 'customer', badge: ['Invoice', 'success'], invoiceLabel: '🧾 Invoice' });
+    else if (v === 'payment_in') await renderTypeView({ type: 'payment_in', title: 'Add Payment In', label: 'Payment In', partyType: 'customer', badge: ['Payment In', 'success'] });
     else if (v === 'quotations') await renderQuotations();
-    else if (v === 'sales_return') await renderTypeView({ type: 'sales_return', title: 'Sales Returns', label: 'Sales Return', partyType: 'customer', badge: ['Sales Return', 'warning'], neg: true });
+    else if (v === 'sales_return') await renderTypeView({ type: 'sales_return', title: 'Create Sales Return', label: 'Sales Return', partyType: 'customer', badge: ['Sales Return', 'warning'], neg: true });
     else if (v === 'purchase') await renderTypeView({ type: 'purchase', title: 'Purchases', label: 'Purchase', partyType: 'supplier', badge: ['Purchase', 'info'] });
     else if (v === 'payment_out') await renderTypeView({ type: 'payment_out', title: 'Payment Out', label: 'Payment', partyType: 'supplier', badge: ['Payment Out', 'warning'], neg: true });
     else if (v === 'purchase_return') await renderTypeView({ type: 'purchase_return', title: 'Purchase Returns', label: 'Purchase Return', partyType: 'supplier', badge: ['Purchase Return', 'info'], neg: true });
@@ -1275,11 +1274,6 @@ async function renderSettings() {
             <input type="file" id="importFile" accept=".json" class="hidden"/>
           </div>
         </div>
-        <div class="card card-pad" style="border-color:#f3c5c7">
-          <h3 class="mb-16" style="color:var(--danger)">Danger zone</h3>
-          <p style="color:var(--text-secondary);margin-bottom:14px">Delete all transactions, parties and items. This cannot be undone.</p>
-          <button class="btn btn-danger" onclick="resetData()">Reset business data</button>
-        </div>
       </div>
     </div>`;
 
@@ -1380,22 +1374,6 @@ async function exportData() {
   a.click();
   URL.revokeObjectURL(a.href);
   toast('Backup downloaded');
-}
-
-function resetData() {
-  const wrap = openModal('Reset business data', `<p style="color:var(--text-secondary)">Type <b>RESET</b> to confirm you want to delete all your business data.</p>
-    <div class="field mt-8"><input class="input" id="resetConfirm" placeholder="RESET"/></div>`,
-    `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-danger" id="doReset" disabled>Reset everything</button>`);
-  wrap.querySelector('#resetConfirm').addEventListener('input', e => {
-    wrap.querySelector('#doReset').disabled = e.target.value !== 'RESET';
-  });
-  wrap.querySelector('#doReset').addEventListener('click', async () => {
-    try {
-      await api('/import', { method: 'POST', body: { app: 'len-den', parties: [], items: [], transactions: [] } });
-      toast('Business data reset');
-      closeModal(wrap); await loadRefs(); route();
-    } catch (e) { toast(e.message, 'error'); }
-  });
 }
 
 /* ---------- Manage Accounts ---------- */
@@ -1539,59 +1517,219 @@ function partyPhotoHtml(p) {
   return `<div class="party-avatar party-avatar-plain">${esc((p && p.name || '?')[0].toUpperCase())}</div>`;
 }
 
-async function renderImport(type) {
-  setTitle(type === 'items' ? 'Import Items' : 'Import Parties');
-  const itemsCard = `
-      <div class="card card-pad" ${type === 'items' ? 'style="border-color:var(--primary)"' : ''}>
-        <h3 class="mb-16">Import items (CSV)</h3>
-        <p style="color:var(--text-secondary);margin-bottom:14px">Columns: <code>name,unit,category,code,type,purchase_price,wholesale_price,sale_price,mrp,stock,low_stock</code>. <code>type</code> is <code>goods</code> or <code>service</code>.</p>
-        <div class="row">
-          <button class="btn ${type === 'items' ? 'btn-primary' : ''}" onclick="document.getElementById('impItems').click()">⬆ Import items</button>
-          <input type="file" id="impItems" accept=".csv,.txt" class="hidden"/>
-          <button class="btn btn-sm" onclick="dlTemplate('items')">⬇ Template</button>
-        </div>
-      </div>`;
-  const partiesCard = `
-      <div class="card card-pad" ${type === 'parties' ? 'style="border-color:var(--primary)"' : ''}>
-        <h3 class="mb-16">Import parties (CSV)</h3>
-        <p style="color:var(--text-secondary);margin-bottom:14px">Columns: <code>type,name,phone,address,email,opening_balance,note,category</code>. <code>type</code> is <code>customer</code> or <code>supplier</code>.</p>
-        <div class="row">
-          <button class="btn ${type === 'parties' ? 'btn-primary' : ''}" onclick="document.getElementById('impParties').click()">⬆ Import parties</button>
-          <input type="file" id="impParties" accept=".csv,.txt" class="hidden"/>
-          <button class="btn btn-sm" onclick="dlTemplate('parties')">⬇ Template</button>
-        </div>
-      </div>`;
-  $('view').innerHTML = `
-    <div class="page-title">Import Data</div>
-    <div class="page-sub">Bring data into Len Den from a backup or CSV files</div>
-    <div class="grid-2">
-      <div class="card card-pad">
-        <h3 class="mb-16">Restore backup</h3>
-        <p style="color:var(--text-secondary);margin-bottom:14px">Upload a Len Den JSON backup. This replaces all current data.</p>
-        <div class="row">
-          <button class="btn btn-primary" onclick="document.getElementById('impJson').click()">⬆ Restore JSON backup</button>
-          <input type="file" id="impJson" accept=".json" class="hidden"/>
-        </div>
-      </div>
-      ${type === 'items' ? itemsCard : partiesCard}
-      <div class="card card-pad">
-        <h3 class="mb-16">Import transactions (CSV)</h3>
-        <p style="color:var(--text-secondary);margin-bottom:14px">Columns: <code>type,date,party,item,quantity,rate,amount,discount,vat_percent,reminder_date,payment_method,note</code>. Parties and items are matched by name.</p>
-        <div class="row">
-          <button class="btn" onclick="document.getElementById('impTxn').click()">⬆ Import transactions</button>
-          <input type="file" id="impTxn" accept=".csv,.txt" class="hidden"/>
-          <button class="btn btn-sm" onclick="dlTemplate('txn')">⬇ Template</button>
-        </div>
-      </div>
-      ${type === 'parties' ? itemsCard : partiesCard}
-      <div class="card card-pad" style="border-color:#f3c5c7">
-        <h3 class="mb-16" style="color:var(--danger)">Reset all data</h3>
-        <p style="color:var(--text-secondary);margin-bottom:14px">Delete all transactions, parties and items. This cannot be undone.</p>
-        <button class="btn btn-danger" onclick="resetData()">Reset business data</button>
+const IMP_META = {
+  parties: {
+    title: 'Import Parties',
+    sub: 'Bring your customers and suppliers into Len Den',
+    sample: 'Import Party Sample',
+    columns: [
+      { key: 'type', label: 'Type', ph: 'customer / supplier' },
+      { key: 'name', label: 'Name *', ph: 'Party name' },
+      { key: 'phone', label: 'Phone', ph: '98XXXXXXXX' },
+      { key: 'address', label: 'Address', ph: 'City, district' },
+      { key: 'email', label: 'Email', ph: 'name@mail.com' },
+      { key: 'opening_balance', label: 'Opening Balance', ph: '0' },
+      { key: 'category', label: 'Category', ph: 'Retail / Wholesale' },
+      { key: 'note', label: 'Note', ph: 'Optional note' },
+    ],
+  },
+  items: {
+    title: 'Import Items',
+    sub: 'Bring your inventory items into Len Den',
+    sample: 'Import Item Sample',
+    columns: [
+      { key: 'name', label: 'Name *', ph: 'Item name' },
+      { key: 'unit', label: 'Unit', ph: 'pcs / kg / ltr' },
+      { key: 'category', label: 'Category', ph: 'Stationery' },
+      { key: 'code', label: 'Code', ph: 'NB-001' },
+      { key: 'type', label: 'Type', ph: 'goods / service' },
+      { key: 'purchase_price', label: 'Purchase Price', ph: '0' },
+      { key: 'wholesale_price', label: 'Wholesale Price', ph: '0' },
+      { key: 'sale_price', label: 'Sale Price', ph: '0' },
+      { key: 'mrp', label: 'MRP', ph: '0' },
+      { key: 'stock', label: 'Stock', ph: '0' },
+      { key: 'low_stock', label: 'Low Stock', ph: '0' },
+    ],
+  },
+};
+function importRowOk(type, r) {
+  return !!((r && r.name) || '').trim();
+}
+function importRowNormalize(type, r) {
+  const o = { ...r };
+  if (type === 'parties') {
+    o.type = ['customer', 'supplier'].includes(String(o.type || '').toLowerCase()) ? String(o.type).toLowerCase() : 'customer';
+    o.opening_balance = Number(o.opening_balance) || 0;
+  } else {
+    o.type = ['goods', 'service'].includes(String(o.type || '').toLowerCase()) ? String(o.type).toLowerCase() : 'goods';
+    ['purchase_price', 'wholesale_price', 'sale_price', 'mrp', 'stock', 'low_stock'].forEach(k => { o[k] = Number(o[k]) || 0; });
+    o.unit = o.unit || 'pcs';
+  }
+  return o;
+}
+function importStepper(cur) {
+  const mk = (n, t, d, cls) => `<div class="imp-step ${cls}"><span class="imp-num">${cls === 'done' ? '✓' : n}</span><div><b>${t}</b><div class="hint" style="font-size:12px">${d}</div></div></div>`;
+  return `<div class="imp-steps">
+    ${mk(1, 'Download the file & Fill Data', 'Get the sample and enter your data', cur === 1 ? 'active' : 'done')}
+    ${mk(2, 'Review & Adjust Data', 'Check and fix the data in the app', cur >= 2 ? 'active' : '')}
+    ${mk(3, 'Confirm & Import', 'Start importing your data', cur === 3 ? 'active' : '')}
+  </div>`;
+}
+function importDropZone(type) {
+  return `<div class="imp-drop" id="impDrop">
+    <div style="font-size:32px;line-height:1">📄</div>
+    <div class="imp-drop-title">Click to Upload or drag and drop</div>
+    <div class="hint" style="color:var(--text-tertiary);font-size:12px">Only excel file upto 500 entries &amp; 1MB is supported.</div>
+    <input type="file" id="imp${type === 'items' ? 'Items' : 'Parties'}" accept=".csv,.txt" class="hidden"/>
+  </div>`;
+}
+function importReviewTable(type, rows) {
+  const cols = IMP_META[type].columns;
+  const thead = `<tr><th style="width:30px">#</th><th style="width:56px">Status</th>${cols.map(c => `<th>${c.label}</th>`).join('')}<th style="width:40px"></th></tr>`;
+  const tbody = rows.map((r, i) => {
+    const ok = importRowOk(type, r);
+    return `<tr class="${ok ? '' : 'imp-bad'}">
+      <td>${i + 1}</td>
+      <td class="imp-stat">${ok ? '<span class="badge badge-success">✓</span>' : '<span class="badge badge-danger" title="Missing name">!</span>'}</td>
+      ${cols.map(c => `<td><input class="input imp-in" data-i="${i}" data-k="${c.key}" value="${esc(r[c.key] || '')}" placeholder="${c.ph}"/></td>`).join('')}
+      <td><button class="btn btn-sm btn-ghost" data-del="${i}">🗑</button></td>
+    </tr>`;
+  }).join('');
+  return `<div class="card card-pad mt-16">
+    <h3 class="mb-12">Review &amp; adjust your data <span style="color:var(--text-tertiary);font-size:13px;font-weight:400">(${rows.length} rows)</span></h3>
+    <div class="table-wrap"><table id="impReview"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>
+    <div class="hint" style="color:var(--text-tertiary);font-size:12px;margin-top:8px">Edit any cell to fix your data. Rows highlighted in red are missing the <b>name</b> field and will be skipped.</div>
+  </div>`;
+}
+function importStep3(type, rows, valid) {
+  return `<div class="card card-pad mt-16" style="border-color:var(--primary)">
+    <h3 class="mb-12">3. Confirm &amp; Import</h3>
+    <p style="color:var(--text-secondary);margin-bottom:14px">When everything is ready to import you can start the import process and your data will be imported shortly.</p>
+    <div class="row spread">
+      <div><b id="impReady">${valid} of ${rows.length} rows ready</b>${valid < rows.length ? `<div class="hint" style="color:var(--danger)">${rows.length - valid} row${rows.length - valid === 1 ? '' : 's'} will be skipped (missing name)</div>` : ''}</div>
+      <button class="btn btn-primary ${valid ? '' : 'disabled'}" id="impGo">🚀 Import ${valid} ${type === 'items' ? 'items' : 'parties'}</button>
+    </div>
+  </div>`;
+}
+function otherImportCards() {
+  return `
+    <div class="card card-pad mt-16">
+      <h3 class="mb-12">More import options</h3>
+      <div class="row" style="flex-wrap:wrap;gap:10px">
+        <button class="btn btn-sm" onclick="document.getElementById('impJson').click()">⬆ Restore JSON backup</button>
+        <input type="file" id="impJson" accept=".json" class="hidden"/>
+        <button class="btn btn-sm" onclick="document.getElementById('impTxn').click()">⬆ Import transactions (CSV)</button>
+        <input type="file" id="impTxn" accept=".csv,.txt" class="hidden"/>
+        <button class="btn btn-sm" onclick="dlTemplate('txn')">⬇ Transactions template</button>
       </div>
     </div>`;
+}
+async function renderImport(type) {
+  setTitle(type === 'items' ? 'Import Items' : 'Import Parties');
+  if (state.impType !== type) { state.impRows = []; state.impType = type; }
+  const meta = IMP_META[type];
+  const rows = state.impRows || [];
+  const valid = rows.filter(r => importRowOk(type, r)).length;
+  $('view').innerHTML = `
+    <div class="row spread">
+      <div><div class="page-title">${meta.title}</div><div class="page-sub">${meta.sub}</div></div>
+    </div>
+    ${importStepper(rows.length ? 2 : 1)}
+    <div class="grid-2 mt-16">
+      <div class="card card-pad">
+        <h3 class="mb-12">1. Download the file &amp; Fill Data</h3>
+        <p style="color:var(--text-secondary);margin-bottom:14px">Download our sample file and enter your data according to the file format.</p>
+        <div class="row spread">
+          <div><b>${meta.sample}</b><div class="hint" style="color:var(--text-tertiary);font-size:12px">CSV file · opens in Excel &amp; Google Sheets</div></div>
+          <button class="btn btn-primary" onclick="dlTemplate('${type}')">⬇ Download Sample File</button>
+        </div>
+      </div>
+      <div class="card card-pad">
+        <h3 class="mb-12">2. Review &amp; Adjust Data</h3>
+        <p style="color:var(--text-secondary);margin-bottom:14px">Review the data to be imported from the app. If there are any errors, you can fix it from the app itself and make your data ready to import.</p>
+        ${importDropZone(type)}
+      </div>
+    </div>
+    ${rows.length ? importReviewTable(type, rows) + importStep3(type, rows, valid) : ''}
+    ${otherImportCards()}`;
 
-  $('impJson').addEventListener('change', async e => {
+  const drop = $('impDrop');
+  const input = $('imp' + (type === 'items' ? 'Items' : 'Parties'));
+  const read = async file => {
+    if (!file) return;
+    if (file.size > 1024 * 1024) return toast('File is larger than 1MB', 'error');
+    const text = await fileToText(file);
+    if (!text) return;
+    const rows = parseCSV(text);
+    if (rows.length - 1 > 500) return toast('Only 500 entries are supported', 'error');
+    const list = rowsToObjects(rows, type === 'items'
+      ? { name: 'name', unit: 'unit', category: 'category', code: 'code', type: 'type', purchase_price: 'purchase_price', wholesale_price: 'wholesale_price', sale_price: 'sale_price', mrp: 'mrp', stock: 'stock', low_stock: 'low_stock' }
+      : { type: 'type', name: 'name', phone: 'phone', address: 'address', email: 'email', opening_balance: 'opening_balance', note: 'note', category: 'category' });
+    if (!list.length) return toast('No valid rows found in file', 'error');
+    state.impRows = list;
+    route();
+  };
+  if (drop) {
+    drop.addEventListener('click', e => { if (e.target !== input) input.click(); });
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) read(e.dataTransfer.files[0]); });
+  }
+  if (input) input.addEventListener('change', e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    read(f);
+  });
+
+  const tbody = document.querySelector('#impReview tbody');
+  if (tbody) {
+    tbody.addEventListener('input', e => {
+      const el = e.target;
+      const i = Number(el.dataset.i);
+      const k = el.dataset.k;
+      if (!state.impRows[i] || !k) return;
+      state.impRows[i][k] = el.value;
+      const ok = importRowOk(type, state.impRows[i]);
+      const tr = el.closest('tr');
+      if (tr) {
+        tr.classList.toggle('imp-bad', !ok);
+        const stat = tr.querySelector('.imp-stat');
+        if (stat) stat.innerHTML = ok ? '<span class="badge badge-success">✓</span>' : '<span class="badge badge-danger">!</span>';
+      }
+      const ready = document.getElementById('impReady');
+      const go = document.getElementById('impGo');
+      const cnt = state.impRows.filter(r => importRowOk(type, r)).length;
+      if (ready) ready.textContent = cnt + ' of ' + state.impRows.length + ' rows ready';
+      if (go) {
+        go.classList.toggle('disabled', !cnt);
+        go.textContent = '🚀 Import ' + cnt + (type === 'items' ? ' items' : ' parties');
+      }
+    });
+    tbody.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-del]');
+      if (!btn) return;
+      state.impRows.splice(Number(btn.dataset.del), 1);
+      route();
+    });
+  }
+
+  const go = $('impGo');
+  if (go) go.addEventListener('click', async () => {
+    const list = state.impRows.filter(r => importRowOk(type, r)).map(r => importRowNormalize(type, r));
+    if (!list.length) return;
+    go.disabled = true;
+    try {
+      const j = await api('/import/csv/' + type, { method: 'POST', body: list });
+      toast(type === 'items'
+        ? j.count + ' item' + (j.count === 1 ? '' : 's') + ' imported'
+        : j.count + ' party' + (j.count === 1 ? '' : 'ies') + ' imported');
+      state.impRows = [];
+      await loadRefs(); route();
+    } catch (err) { toast(err.message, 'error'); go.disabled = false; }
+  });
+
+  const impJson = $('impJson');
+  if (impJson) impJson.addEventListener('change', async e => {
     const text = await readFileAsText(e.target);
     if (!text) return;
     try {
@@ -1603,33 +1741,8 @@ async function renderImport(type) {
     } catch (err) { toast(err.message, 'error'); }
   });
 
-  $('impParties').addEventListener('change', async e => {
-    const text = await readFileAsText(e.target);
-    if (!text) return;
-    const rows = parseCSV(text);
-    const list = rowsToObjects(rows, { type: 'type', name: 'name', phone: 'phone', address: 'address', email: 'email', opening_balance: 'opening_balance', note: 'note', category: 'category' });
-    if (!list.length) return toast('No valid rows found in CSV', 'error');
-    try {
-      const j = await api('/import/csv/parties', { method: 'POST', body: list });
-      toast(j.count + ' party' + (j.count === 1 ? '' : 'ies') + ' imported');
-      await loadRefs(); route();
-    } catch (err) { toast(err.message, 'error'); }
-  });
-
-  $('impItems').addEventListener('change', async e => {
-    const text = await readFileAsText(e.target);
-    if (!text) return;
-    const rows = parseCSV(text);
-    const list = rowsToObjects(rows, { name: 'name', unit: 'unit', category: 'category', code: 'code', type: 'type', purchase_price: 'purchase_price', wholesale_price: 'wholesale_price', sale_price: 'sale_price', mrp: 'mrp', stock: 'stock', low_stock: 'low_stock' });
-    if (!list.length) return toast('No valid rows found in CSV', 'error');
-    try {
-      const j = await api('/import/csv/items', { method: 'POST', body: list });
-      toast(j.count + ' item' + (j.count === 1 ? '' : 's') + ' imported');
-      await loadRefs(); route();
-    } catch (err) { toast(err.message, 'error'); }
-  });
-
-  $('impTxn').addEventListener('change', async e => {
+  const impTxn = $('impTxn');
+  if (impTxn) impTxn.addEventListener('change', async e => {
     const text = await readFileAsText(e.target);
     if (!text) return;
     const rows = parseCSV(text);
@@ -1645,21 +1758,21 @@ async function renderImport(type) {
 
 function dlTemplate(which) {
   const content = which === 'parties'
-    ? 'type,name,phone,address,email,opening_balance,note,category\ncustomer,Ram Shrestha,9841234567,Kathmandu,ram@example.com,0,,Retail\nsupplier,Hari Traders,9801234567,Lalitpur,,1000,,Wholesale\n'
+    ? 'type,name,phone,address,email,opening_balance,note,category\ncustomer,Ram Shrestha,9841234567,Kathmandu,ram@example.com,0,Regular customer,Retail\ncustomer,Sita Sharma,9851234567,Bhaktapur,sita@example.com,250,,Retail\nsupplier,Hari Traders,9801234567,Lalitpur,hari@traders.com,1000,Monthly supplies,Wholesale\n'
     : which === 'items'
-      ? 'name,unit,category,code,type,purchase_price,wholesale_price,sale_price,mrp,stock,low_stock\nNotebook,pcs,Stationery,NB-001,goods,30,40,50,55,50,10\nCoca-Cola 1L,pcs,Cold drinks,CC-1L,goods,90,100,110,120,24,6\n'
+      ? 'name,unit,category,code,type,purchase_price,wholesale_price,sale_price,mrp,stock,low_stock\nNotebook,pcs,Stationery,NB-001,goods,30,40,50,55,50,10\nCoca-Cola 1L,pcs,Cold drinks,CC-1L,goods,90,100,110,120,24,6\nA4 Paper (ream),pcs,Stationery,AP-100,goods,380,420,450,460,20,5\nHome Delivery,service,Service,HD-001,service,0,0,150,150,0,0\n'
       : 'type,date,party,item,quantity,rate,amount,discount,vat_percent,reminder_date,payment_method,note\nsale,2026-08-07,Ram Shrestha,Notebook,2,50,100,0,0,,Cash,\npurchase,2026-08-06,Hari Traders,,,10,500,0,13,,Bank,\nexpense,2026-08-05,,,1,300,300,0,0,,Cash,Rent\n';
   const blob = new Blob([content], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = which === 'parties' ? 'parties-template.csv' : which === 'items' ? 'items-template.csv' : 'transactions-template.csv';
+  a.download = which === 'parties' ? 'import-party-sample.csv' : which === 'items' ? 'import-item-sample.csv' : 'transactions-template.csv';
   a.click();
   URL.revokeObjectURL(a.href);
 }
 
 /* ---------- Quotations ---------- */
 async function renderQuotations() {
-  setTitle('Quotations');
+  setTitle('Create New Quotation');
   const d = await api('/transactions?type=quotation&page=1&limit=200');
   const rows = d.transactions.map(t => `
     <tr>
@@ -1677,8 +1790,8 @@ async function renderQuotations() {
     </tr>`).join('');
   $('view').innerHTML = `
     <div class="row spread">
-      <div><div class="page-title">Quotations</div><div class="page-sub">${d.total} quotation${d.total === 1 ? '' : 's'} · draft price offers you can convert to sales</div></div>
-      <button class="btn btn-primary" onclick="addTxnOfType('quotation')">+ Add Quotation</button>
+      <div><div class="page-title">Create New Quotation</div><div class="page-sub">${d.total} quotation${d.total === 1 ? '' : 's'} · draft price offers you can convert to sales</div></div>
+      <button class="btn btn-primary" onclick="addTxnOfType('quotation')">+ Create New Quotation</button>
     </div>
     <div class="card card-pad mt-8">
       <div class="table-wrap"><table>
@@ -1703,76 +1816,175 @@ async function convertQuotation(id) {
 }
 
 /* ---------- Business Tools: Business Cards ---------- */
-function businessCardHtml(p) {
+const BC_STYLES = [{ id: 'left', name: 'Left slide', icon: '⬅' }, { id: 'right', name: 'Right slide', icon: '➡' }];
+const BC_COLORS = ['#6359e0', '#7c3aed', '#2563eb', '#0d9488', '#16a34a', '#ea580c', '#e11d48', '#b45309', '#334155', '#0f172a'];
+
+function bcDefaults() {
   const b = state.business || {};
-  const name = (p && p.name) || 'Customer';
-  const role = p ? (p.type === 'supplier' ? 'Supplier' : 'Customer') : 'Guest';
-  return `
-    <div class="bizcard" style="background:linear-gradient(135deg,#6359e0,#8b7cf6);color:#fff">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start">
-        <div style="font-size:20px;font-weight:800;letter-spacing:.5px">${esc(b.name || 'Len Den')}</div>
-        <div class="brand-logo" style="width:34px;height:34px;font-size:14px">${(b.name || 'LD').trim()[0].toUpperCase()}</div>
-      </div>
-      <div style="margin-top:14px;font-size:15px;font-weight:700">${esc(name)}</div>
-      <div style="font-size:12px;opacity:.85">${role}${p && p.category ? ' · ' + esc(p.category) : ''}</div>
-      <div style="margin-top:14px;font-size:12px;line-height:1.7;opacity:.95">
-        ${b.address ? `<div>📍 ${esc(b.address)}</div>` : ''}
-        ${b.phone ? `<div>📞 +977 ${esc(b.phone)}</div>` : ''}
-        ${p && p.phone ? `<div>📱 +977 ${esc(p.phone)}</div>` : ''}
-        ${b.owner_name ? `<div>👤 ${esc(b.owner_name)}</div>` : ''}
-      </div>
-    </div>`;
+  return { yourName: b.owner_name || '', bizName: b.name || '', address: b.address || '', phone: b.phone || '', email: '', logo: '', style: 'left', color: BC_COLORS[0] };
+}
+function loadBc() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('lenden_bc') || 'null');
+    return { ...bcDefaults(), ...(saved || {}) };
+  } catch (e) { return bcDefaults(); }
+}
+function saveBc(t) {
+  localStorage.setItem('lenden_bc', JSON.stringify(t));
+  const pv = document.getElementById('bcPreview');
+  if (pv) pv.innerHTML = businessCardHtml(t);
+}
+function bcSet(key, val) {
+  const t = loadBc();
+  t[key] = val;
+  saveBc(t);
+  if (key === 'style') $$('.bc-style').forEach(b => b.classList.toggle('active', b.dataset.style === val));
+  if (key === 'color') $$('.bc-color').forEach(b => b.classList.toggle('active', b.dataset.color === val));
+  if (key === 'logo') route();
+}
+function bcReset() { localStorage.removeItem('lenden_bc'); route(); }
+function shade(hex, pct) {
+  const n = parseInt(String(hex).replace('#', ''), 16);
+  if (isNaN(n)) return '#6359e0';
+  const r = Math.min(255, Math.max(0, ((n >> 16) & 255) + pct));
+  const g = Math.min(255, Math.max(0, ((n >> 8) & 255) + pct));
+  const b = Math.min(255, Math.max(0, (n & 255) + pct));
+  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function businessCardHtml(t) {
+  const initials = (t.bizName || 'LD').trim()[0].toUpperCase();
+  const logo = t.logo ? `<img class="bc-logo-img" src="${t.logo}" alt=""/>` : esc(initials);
+  const brand = `<div class="bc-brand"><div class="bc-logo">${logo}</div><div class="bc-brand-name">${esc(t.bizName || 'Your Business')}</div></div>`;
+  const details = `<div class="bc-details">
+    <div class="bc-name">${esc(t.yourName || 'Your Name')}</div>
+    ${t.address ? `<div class="bc-line">📍 ${esc(t.address)}</div>` : ''}
+    ${t.phone ? `<div class="bc-line">📞 ${esc(t.phone)}</div>` : ''}
+    ${t.email ? `<div class="bc-line">✉ ${esc(t.email)}</div>` : ''}
+  </div>`;
+  return `<div class="bc-card" style="background:linear-gradient(135deg,${t.color},${shade(t.color, -70)});color:#fff">
+    ${t.style === 'right' ? details + brand : brand + details}
+  </div>`;
 }
 async function renderBusinessCards() {
   setTitle('Business Cards');
-  const d = await api('/parties?limit=500');
-  const parties = d.parties;
-  const partyOpts = `<option value="">— Choose a party —</option>` + parties.map(p => `<option value="${p.id}">${esc(p.name)} (${p.type === 'supplier' ? 'Supplier' : 'Customer'})</option>`).join('');
-  const grid = parties.length ? parties.map(p => `
-    <div class="card card-pad" style="display:flex;flex-direction:column;gap:10px">
-      ${businessCardHtml(p)}
-      <div class="row" style="gap:6px">
-        <button class="btn btn-sm" style="flex:1" onclick="printBusinessCard(${p.id})">🖨 Print</button>
-        <button class="btn btn-sm btn-ghost" style="flex:1" onclick="shareBusinessCard(${p.id})">📲 WhatsApp</button>
-      </div>
-    </div>`).join('') : '';
+  const t = loadBc();
+  const fld = (label, id, ph, val) => `<div class="field"><label>${label}</label><input class="input" id="${id}" placeholder="${ph}" value="${esc(val || '')}" oninput="bcSet('${id.slice(3)}', this.value)"/></div>`;
   $('view').innerHTML = `
-    <div class="page-title">Business Cards</div>
-    <div class="page-sub">Digital business cards for your customers and suppliers — print or share on WhatsApp</div>
-    <div class="card card-pad mt-8" style="max-width:560px">
-      <div class="row" style="gap:10px;align-items:flex-end">
-        <div class="field" style="flex:1;margin:0"><label>Party</label><select class="select" id="bc_party">${partyOpts}</select></div>
-        <button class="btn btn-primary" onclick="printSelectedCard()">🖨 Preview & Print</button>
-      </div>
-      <div class="hint" style="color:var(--text-tertiary);font-size:12px;margin-top:8px">Business details come from Settings. Cards show your business plus the party's contact info.</div>
+    <div class="row spread">
+      <div><div class="page-title">Business Cards</div><div class="page-sub">Design your digital business card and download it</div></div>
     </div>
-    <h3 class="mt-24 mb-8">All cards</h3>
-    <div class="grid-2">${grid || '<div class="empty" style="grid-column:1/-1">Add parties first to generate their business cards.</div>'}</div>`;
-  const sel = $('bc_party');
-  if (sel) window.__bcParties = parties;
+    <div class="grid-2 mt-8">
+      <div class="card card-pad">
+        <h3 class="mb-16">Generate Your Business Card</h3>
+        ${fld('Your Name', 'bc_yourName', 'Your name', t.yourName)}
+        ${fld('Business Name', 'bc_bizName', 'Business name', t.bizName)}
+        ${fld('Business Address', 'bc_address', 'Enter business address', t.address)}
+        ${fld('Your Contact Number', 'bc_phone', '98XXXXXXXX', t.phone)}
+        ${fld('Business Email', 'bc_email', 'Enter your business email', t.email)}
+        <div class="field"><label>Business Logo</label>
+          <div class="row" style="gap:10px;align-items:center">
+            ${t.logo ? `<img src="${t.logo}" class="bc-logo-prev"/>` : ''}
+            <button class="btn btn-sm" onclick="document.getElementById('bc_logo').click()">📷 Upload logo</button>
+            ${t.logo ? `<button class="btn btn-sm btn-ghost" onclick="bcSet('logo','')">✕</button>` : ''}
+            <input type="file" id="bc_logo" accept="image/*" class="hidden"/>
+          </div>
+        </div>
+        <div class="field"><label>Select Card Style</label>
+          <div class="bc-styles">
+            ${BC_STYLES.map(s => `<button class="bc-style ${t.style === s.id ? 'active' : ''}" data-style="${s.id}" onclick="bcSet('style','${s.id}')"><span class="bc-style-icon">${s.icon}</span>${s.name}</button>`).join('')}
+          </div>
+        </div>
+        <div class="field"><label>Select Color</label>
+          <div class="bc-colors">
+            ${BC_COLORS.map(c => `<button class="bc-color ${t.color === c ? 'active' : ''}" data-color="${c}" style="background:${c}" onclick="bcSet('color','${c}')" title="${c}"></button>`).join('')}
+          </div>
+        </div>
+        <div class="row mt-8" style="gap:10px">
+          <button class="btn" onclick="bcReset()">↺ Restore to Default</button>
+          <button class="btn btn-primary" style="flex:1" onclick="downloadBusinessCard()">⬇ Download Business Card</button>
+        </div>
+      </div>
+      <div class="card card-pad" style="align-self:flex-start">
+        <h3 class="mb-16">Preview</h3>
+        <div id="bcPreview">${businessCardHtml(t)}</div>
+        <div class="hint" style="color:var(--text-tertiary);font-size:12px;margin-top:10px">Standard business card size · downloads as PNG</div>
+      </div>
+    </div>`;
+  const logoInput = $('bc_logo');
+  if (logoInput) logoInput.addEventListener('change', async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    const dataUrl = await readImageAsDataUrl(f, 256);
+    if (dataUrl) bcSet('logo', dataUrl);
+  });
 }
-async function printBusinessCard(id) {
-  const d = await api('/parties?limit=500');
-  const p = d.parties.find(x => x.id === id);
-  if (!p) return;
-  const html = businessCardHtml(p);
-  const w = window.open('', '_blank', 'width=420,height=320');
-  w.document.write(`<!doctype html><html><head><title>Business Card</title><style>body{font-family:Arial,sans-serif;margin:0;padding:24px}@page{size:3.5in 2in;margin:0}.bizcard{width:100%;height:100%;display:flex;flex-direction:column;justify-content:center;padding:18px;box-sizing:border-box;border-radius:12px;font-family:Arial}</style></head><body>${html}`);
-  w.document.write('<script>window.onload=function(){window.print();}<\/script></body></html>');
-  w.document.close();
+function bcRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
-function shareBusinessCard(id) {
-  const p = (window.__bcParties || []).find(x => x.id === id);
-  if (!p || !p.phone) return toast('No phone number on file', 'error');
-  const b = state.business || {};
-  const text = `${b.name || 'Len Den'}\n${b.address || ''}\n📞 +977 ${b.phone || ''}\n\nYour card: ${p.name} (${p.type === 'supplier' ? 'Supplier' : 'Customer'})`;
-  window.open('https://wa.me/977' + p.phone + '?text=' + encodeURIComponent(text), '_blank');
-}
-async function printSelectedCard() {
-  const sel = document.getElementById('bc_party');
-  const id = sel && Number(sel.value);
-  if (!id) return toast('Choose a party first', 'error');
-  await printBusinessCard(id);
+function downloadBusinessCard() {
+  const t = loadBc();
+  const W = 1050, H = 600, pad = 70;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const finish = () => {
+    const a = document.createElement('a');
+    a.download = ((t.bizName || 'business-card').replace(/[^a-z0-9]+/gi, '-') || 'business-card') + '.png';
+    a.href = cv.toDataURL('image/png');
+    a.click();
+    toast('Business card downloaded');
+  };
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, t.color);
+  g.addColorStop(1, shade(t.color, -70));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  const right = t.style === 'right';
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.font = '800 58px Arial';
+  ctx.fillText((t.bizName || 'Your Business').slice(0, 24), W / 2, 84);
+  ctx.textAlign = right ? 'left' : 'right';
+  const x = right ? pad : W - pad;
+  ctx.font = '700 52px Arial';
+  ctx.fillText((t.yourName || 'Your Name').slice(0, 26), x, 195);
+  ctx.font = '400 36px Arial';
+  if (t.address) ctx.fillText(t.address.slice(0, 46), x, 275);
+  if (t.phone) ctx.fillText(t.phone.slice(0, 24), x, 345);
+  if (t.email) ctx.fillText(t.email.slice(0, 42), x, 415);
+  const lw = 140;
+  const lx = right ? W - pad - lw : pad;
+  const ly = H - lw - pad;
+  ctx.fillStyle = 'rgba(255,255,255,.16)';
+  bcRoundRect(ctx, lx, ly, lw, lw, 28);
+  ctx.fill();
+  if (t.logo) {
+    const img = new Image();
+    img.onload = () => {
+      ctx.save();
+      bcRoundRect(ctx, lx, ly, lw, lw, 28);
+      ctx.clip();
+      ctx.drawImage(img, lx, ly, lw, lw);
+      ctx.restore();
+      finish();
+    };
+    img.onerror = finish;
+    img.src = t.logo;
+  } else {
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = '800 68px Arial';
+    ctx.fillText((t.bizName || 'LD').trim()[0].toUpperCase(), lx + lw / 2, ly + lw / 2 + 6);
+    finish();
+  }
 }
 
 /* ---------- Business Tools: Greeting Cards ---------- */
@@ -1853,35 +2065,134 @@ async function greetParty(how) {
 }
 
 /* ---------- Business Tools: Reminders ---------- */
+const REM_TYPES = {
+  task: ['Task Reminder', 'badge-info'],
+  payment: ['Payment Reminder', 'badge-warning'],
+  bill: ['Bill Reminder', 'badge-primary'],
+  meeting: ['Meeting', 'badge-soft'],
+  birthday: ['Birthday', 'badge-success'],
+  followup: ['Follow Up', 'badge-soft'],
+  other: ['Other', 'badge-soft'],
+};
+function localNowDT() {
+  const d = new Date();
+  const pad = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function fmtDueAt(dueAt) {
+  if (!dueAt) return '';
+  const [d, t] = String(dueAt).split('T');
+  const out = prettyDate(d);
+  if (t) {
+    const [h, m] = t.split(':').map(Number);
+    const ap = h >= 12 ? 'PM' : 'AM';
+    const hh = ((h + 11) % 12) + 1;
+    return out + ' · ' + hh + ':' + String(m).padStart(2, '0') + ' ' + ap;
+  }
+  return out;
+}
 async function renderReminders() {
   setTitle('Reminders');
-  const d = await api('/transactions?page=1&limit=1000');
+  const [d, rd] = await Promise.all([api('/transactions?page=1&limit=1000'), api('/reminders')]);
+  window.__rems = rd.reminders;
   const now = today();
-  const withRem = d.transactions.filter(t => t.reminder_date).sort((a, b) => a.reminder_date.localeCompare(b.reminder_date));
-  const overdue = withRem.filter(t => t.reminder_date < now);
-  const todayR = withRem.filter(t => t.reminder_date === now);
-  const upcoming = withRem.filter(t => t.reminder_date > now);
-  const sec = (title, list) => `
-    <h3 class="mt-16 mb-8">${title} <span class="badge badge-soft">${list.length}</span></h3>
-    ${list.length ? list.map(t => `
-      <div class="card card-pad" style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
-        <div style="flex:1">
-          <div style="font-weight:700">${esc(t.party_name || t.item_name || (t.note || 'Entry'))}</div>
-          <div class="hint" style="color:var(--text-tertiary);font-size:12px">${esc(t.ref_no || '')} · Due ${prettyDate(t.reminder_date)} · ${rs(t.amount)}</div>
-        </div>
-        <button class="btn btn-sm btn-ghost" onclick="viewInvoice(${t.id})">🧾</button>
-        <button class="btn btn-sm ${t.party_id ? 'btn-primary' : ''}" ${t.party_id ? '' : 'disabled'} onclick="waRemindFromTxn(${t.id})">📲 Remind</button>
-        <button class="btn btn-sm btn-ghost" onclick="clearReminder(${t.id})">✓ Done</button>
-      </div>`).join('') : '<div class="empty">Nothing here.</div>'}`;
+  const nowDT = localNowDT();
+  const txn = d.transactions.filter(t => t.reminder_date).sort((a, b) => a.reminder_date.localeCompare(b.reminder_date));
+  const txnOverdue = txn.filter(t => t.reminder_date < now);
+  const txnToday = txn.filter(t => t.reminder_date === now);
+  const txnUpcoming = txn.filter(t => t.reminder_date > now);
+  const rems = rd.reminders.filter(r => !r.done);
+  const doneR = rd.reminders.filter(r => r.done);
+  const remOverdue = rems.filter(r => r.due_at < nowDT);
+  const remToday = rems.filter(r => r.due_at.slice(0, 10) === now && r.due_at >= nowDT);
+  const remUpcoming = rems.filter(r => r.due_at.slice(0, 10) > now);
+
+  const txnCard = t => `
+    <div class="card card-pad" style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+      <div style="flex:1">
+        <div style="font-weight:700">${esc(t.party_name || t.item_name || (t.note || 'Entry'))}</div>
+        <div class="hint" style="color:var(--text-tertiary);font-size:12px">${esc(t.ref_no || '')} · Due ${prettyDate(t.reminder_date)} · ${rs(t.amount)}</div>
+      </div>
+      <button class="btn btn-sm btn-ghost" onclick="viewInvoice(${t.id})">🧾</button>
+      <button class="btn btn-sm ${t.party_id ? 'btn-primary' : ''}" ${t.party_id ? '' : 'disabled'} onclick="waRemindFromTxn(${t.id})">📲 Remind</button>
+      <button class="btn btn-sm btn-ghost" onclick="clearReminder(${t.id})">✓ Done</button>
+    </div>`;
+  const remCard = r => {
+    const meta = REM_TYPES[r.type] || REM_TYPES.task;
+    return `
+    <div class="card card-pad" style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+      <span class="badge ${meta[1]}">${meta[0]}</span>
+      <div style="flex:1">
+        <div style="font-weight:700">${esc(r.title)}</div>
+        <div class="hint" style="color:var(--text-tertiary);font-size:12px">⏰ ${fmtDueAt(r.due_at)}</div>
+      </div>
+      ${r.done ? '' : `<button class="btn btn-sm btn-ghost" onclick="editReminder(${r.id})">✎</button>
+      <button class="btn btn-sm btn-ghost" onclick="doneReminder(${r.id})">✓ Done</button>`}
+      <button class="btn btn-sm btn-ghost" onclick="delReminder(${r.id})">🗑</button>
+    </div>`;
+  };
+  const sec = (title, txnList, remList) => `
+    <h3 class="mt-16 mb-8">${title} <span class="badge badge-soft">${txnList.length + remList.length}</span></h3>
+    ${txnList.map(txnCard).join('')}
+    ${remList.map(remCard).join('')}
+    ${(!txnList.length && !remList.length) ? '<div class="empty">Nothing here.</div>' : ''}`;
   $('view').innerHTML = `
-    <div class="page-title">Reminders</div>
-    <div class="page-sub">Khata entries with due dates — never forget to collect or pay</div>
-    <div class="card card-pad mt-8">
-      <div class="hint" style="color:var(--text-tertiary);font-size:13px">Set a reminder (due date) when recording a sale or purchase. Overdue items appear first.</div>
+    <div class="row spread">
+      <div><div class="page-title">Reminders</div><div class="page-sub">Never miss a payment, task or follow up</div></div>
+      <button class="btn btn-primary" onclick="addReminder()">+ Add New Reminder</button>
     </div>
-    ${sec('Overdue', overdue)}
-    ${sec('Due today', todayR)}
-    ${sec('Upcoming', upcoming)}`;
+    <div class="card card-pad mt-8">
+      <div class="hint" style="color:var(--text-tertiary);font-size:13px">Standalone reminders let you schedule tasks, payments and follow ups. Khata entries with a due date also appear here.</div>
+    </div>
+    ${sec('Overdue', txnOverdue, remOverdue)}
+    ${sec('Due today', txnToday, remToday)}
+    ${sec('Upcoming', txnUpcoming, remUpcoming)}
+    ${sec('Completed', [], doneR)}`;
+}
+function addReminder(existing) {
+  const isEdit = !!existing;
+  const wrap = openModal(isEdit ? 'Edit Reminder' : 'Add New Reminder', `
+    <div class="field"><label>Reminder Title</label><input class="input" id="r_title" placeholder="eg. Collect payment from Ram" value="${esc(existing ? existing.title : '')}"/></div>
+    <div class="field"><label>Select Date &amp; Time</label><input class="input" id="r_due" type="datetime-local" value="${existing ? esc(existing.due_at) : ''}"/></div>
+    <div class="field"><label>Reminder Type</label>
+      <select class="select" id="r_type">${Object.entries(REM_TYPES).map(([k, v]) => `<option value="${k}" ${existing ? (existing.type === k ? 'selected' : '') : (k === 'task' ? 'selected' : '')}>${v[0]}</option>`).join('')}</select>
+    </div>
+  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button>
+      <button class="btn btn-primary" id="saveReminder">Save</button>`);
+  wrap.querySelector('#saveReminder').addEventListener('click', async () => {
+    const body = {
+      title: wrap.querySelector('#r_title').value.trim(),
+      due_at: wrap.querySelector('#r_due').value,
+      type: wrap.querySelector('#r_type').value,
+    };
+    if (!body.title) return toast('Title is required', 'error');
+    if (!body.due_at) return toast('Select a date & time', 'error');
+    try {
+      if (isEdit) await api('/reminders/' + existing.id, { method: 'PUT', body });
+      else await api('/reminders', { method: 'POST', body });
+      toast(isEdit ? 'Reminder updated' : 'Reminder added');
+      closeModal(wrap); route();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+function editReminder(id) {
+  const r = (window.__rems || []).find(x => x.id === id);
+  if (r) addReminder(r);
+}
+async function doneReminder(id) {
+  try {
+    await api('/reminders/' + id, { method: 'PUT', body: { done: 1 } });
+    toast('Reminder completed');
+    route();
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function delReminder(id) {
+  const wrap = openModal('Delete reminder', `<p style="color:var(--text-secondary)">Delete this reminder?</p>`,
+    `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-danger" id="cDelR">Delete</button>`);
+  wrap.querySelector('#cDelR').addEventListener('click', async () => {
+    try { await api('/reminders/' + id, { method: 'DELETE' }); toast('Reminder deleted'); closeModal(wrap); route(); }
+    catch (e) { toast(e.message, 'error'); }
+  });
 }
 async function waRemindFromTxn(id) {
   const d = await api('/transactions/' + id);
@@ -2267,18 +2578,22 @@ window.delAccount = delAccount;
 window.dlTemplate = dlTemplate;
 window.saveBusiness = saveBusiness;
 window.exportData = exportData;
-window.resetData = resetData;
+
 window.closeModal = closeModal;
 window.setPayType = setPayType;
 window.clearPartyPhoto = clearPartyPhoto;
 window.setGreeting = setGreeting;
 window.greetParty = greetParty;
-window.printBusinessCard = printBusinessCard;
-window.shareBusinessCard = shareBusinessCard;
-window.printSelectedCard = printSelectedCard;
+window.bcSet = bcSet;
+window.bcReset = bcReset;
+window.downloadBusinessCard = downloadBusinessCard;
 window.convertQuotation = convertQuotation;
 window.waRemindFromTxn = waRemindFromTxn;
 window.clearReminder = clearReminder;
+window.addReminder = addReminder;
+window.editReminder = editReminder;
+window.doneReminder = doneReminder;
+window.delReminder = delReminder;
 window.viewBill = viewBill;
 window.printBill = printBill;
 window.delBill = delBill;

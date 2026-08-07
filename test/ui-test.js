@@ -60,7 +60,7 @@ const puppeteer = require('puppeteer-core');
   ok('menu sections = Business, Management, Business Tools, Others, Settings',
     JSON.stringify(sections) === JSON.stringify(['Business', 'Management', 'Business Tools', 'Others', 'Settings']));
   const labels = await page.$$eval('.nav-item', els => els.map(e => { const ico = e.querySelector('.ico'); const car = e.querySelector('.caret'); if (ico) ico.remove(); if (car) car.remove(); return e.textContent.trim(); }));
-  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Sales', 'Sales Invoices', 'Payment In', 'Quotations', 'Sales Return', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Business Tools', 'Business Cards', 'Greeting Cards', 'Reminders', 'Bill Gallery', 'Barcode Generator', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings'];
+  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Create Sales Invoice', 'Add Payment In', 'Create New Quotation', 'Create Sales Return', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Business Tools', 'Business Cards', 'Greeting Cards', 'Reminders', 'Bill Gallery', 'Barcode Generator', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings'];
   ok('menu items match Karobar list', JSON.stringify(labels) === JSON.stringify(expected));
 
   // 5. parties: add a customer with category
