@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS parties (
   opening_balance REAL DEFAULT 0,
   note TEXT DEFAULT '',
   category TEXT DEFAULT '',
+  photo TEXT DEFAULT '',
+  pay_type TEXT DEFAULT 'receive',
+  as_of_date TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
 );
@@ -61,6 +64,8 @@ CREATE TABLE IF NOT EXISTS items (
   name TEXT NOT NULL,
   unit TEXT DEFAULT 'pcs',
   category TEXT DEFAULT '',
+  code TEXT DEFAULT '',
+  type TEXT DEFAULT 'goods',
   purchase_price REAL DEFAULT 0,
   wholesale_price REAL DEFAULT 0,
   sale_price REAL DEFAULT 0,
@@ -74,7 +79,7 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   business_id INTEGER NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('sale','purchase','expense','payment_in','payment_out','other_income')),
+  type TEXT NOT NULL CHECK (type IN ('sale','purchase','expense','payment_in','payment_out','other_income','quotation','sales_return','purchase_return')),
   date TEXT NOT NULL,
   party_id INTEGER,
   item_id INTEGER,
@@ -142,13 +147,59 @@ if (tcol && tcol.sql && !tcol.sql.includes('other_income')) {
   db.exec('PRAGMA foreign_keys = ON;');
 }
 
+/* Migrate existing databases: add the Sales/Purchase sub-menu transaction types. */
+function rebuildTransactions(sql) {
+  db.exec('PRAGMA foreign_keys = OFF;');
+  db.exec('BEGIN;');
+  try {
+    db.exec('ALTER TABLE transactions RENAME TO transactions_old;');
+    db.exec(`CREATE TABLE transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id INTEGER NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('sale','purchase','expense','payment_in','payment_out','other_income','quotation','sales_return','purchase_return')),
+      date TEXT NOT NULL,
+      party_id INTEGER,
+      item_id INTEGER,
+      quantity REAL DEFAULT 0,
+      rate REAL DEFAULT 0,
+      amount REAL NOT NULL DEFAULT 0,
+      discount REAL DEFAULT 0,
+      vat_percent REAL DEFAULT 0,
+      reminder_date TEXT DEFAULT '',
+      payment_method TEXT DEFAULT '',
+      note TEXT DEFAULT '',
+      ref_no TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
+      FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE SET NULL,
+      FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE SET NULL
+    );`);
+    db.exec(`INSERT INTO transactions (id, business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note, ref_no, created_at)
+      SELECT id, business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note, ref_no, created_at FROM transactions_old;`);
+    db.exec('DROP TABLE transactions_old;');
+    db.exec('COMMIT;');
+  } catch (e) {
+    db.exec('ROLLBACK;');
+    throw e;
+  }
+  db.exec('PRAGMA foreign_keys = ON;');
+}
+
+const tcur = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'`).get();
+if (tcur && tcur.sql && !tcur.sql.includes('quotation')) rebuildTransactions(tcur.sql);
+
 /* Migrate existing databases: add newer columns if missing. */
 function hasCol(table, col) {
   return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
 }
 if (!hasCol('businesses', 'invoice_prefix')) db.exec("ALTER TABLE businesses ADD COLUMN invoice_prefix TEXT DEFAULT 'INV'");
 if (!hasCol('parties', 'category')) db.exec("ALTER TABLE parties ADD COLUMN category TEXT DEFAULT ''");
+if (!hasCol('parties', 'photo')) db.exec("ALTER TABLE parties ADD COLUMN photo TEXT DEFAULT ''");
+if (!hasCol('parties', 'pay_type')) db.exec("ALTER TABLE parties ADD COLUMN pay_type TEXT DEFAULT 'receive'");
+if (!hasCol('parties', 'as_of_date')) db.exec("ALTER TABLE parties ADD COLUMN as_of_date TEXT DEFAULT ''");
 if (!hasCol('items', 'category')) db.exec("ALTER TABLE items ADD COLUMN category TEXT DEFAULT ''");
+if (!hasCol('items', 'code')) db.exec("ALTER TABLE items ADD COLUMN code TEXT DEFAULT ''");
+if (!hasCol('items', 'type')) db.exec("ALTER TABLE items ADD COLUMN type TEXT DEFAULT 'goods'");
 if (!hasCol('items', 'wholesale_price')) db.exec('ALTER TABLE items ADD COLUMN wholesale_price REAL DEFAULT 0');
 if (!hasCol('items', 'mrp')) db.exec('ALTER TABLE items ADD COLUMN mrp REAL DEFAULT 0');
 if (!hasCol('transactions', 'discount')) db.exec('ALTER TABLE transactions ADD COLUMN discount REAL DEFAULT 0');

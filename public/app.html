@@ -22,16 +22,40 @@
         <button class="nav-item active" data-view="dashboard"><span class="ico">📊</span> Dashboard</button>
         <button class="nav-item" data-view="parties"><span class="ico">👥</span> Parties</button>
         <button class="nav-item" data-view="items"><span class="ico">📦</span> Inventory</button>
-        <button class="nav-item" data-view="sales"><span class="ico">🧾</span> Sales</button>
-        <button class="nav-item" data-view="purchase"><span class="ico">🛒</span> Purchase</button>
+        <button class="nav-item nav-parent" data-view="sales" data-expands="sales"><span class="ico">🧾</span> Sales<span class="caret">▾</span></button>
+        <div class="nav-sub" id="sub-sales">
+          <button class="nav-item" data-view="sales"><span class="ico">🧾</span> Sales</button>
+          <button class="nav-item" data-view="sales_invoices"><span class="ico">📄</span> Sales Invoices</button>
+          <button class="nav-item" data-view="payment_in"><span class="ico">💵</span> Payment In</button>
+          <button class="nav-item" data-view="quotations"><span class="ico">📝</span> Quotations</button>
+          <button class="nav-item" data-view="sales_return"><span class="ico">↩️</span> Sales Return</button>
+        </div>
+        <button class="nav-item nav-parent" data-view="purchase" data-expands="purchase"><span class="ico">🛒</span> Purchase<span class="caret">▾</span></button>
+        <div class="nav-sub" id="sub-purchase">
+          <button class="nav-item" data-view="purchase"><span class="ico">🛒</span> Purchase</button>
+          <button class="nav-item" data-view="payment_out"><span class="ico">💳</span> Payment Out</button>
+          <button class="nav-item" data-view="purchase_return"><span class="ico">↪️</span> Purchase Return</button>
+        </div>
         <button class="nav-item" data-view="expense"><span class="ico">💸</span> Expense</button>
         <button class="nav-item" data-view="other_income"><span class="ico">💰</span> Other Income</button>
         <button class="nav-item" data-view="accounts"><span class="ico">🏦</span> Manage Accounts</button>
         <div class="nav-section">Management</div>
         <button class="nav-item" data-view="reports"><span class="ico">📈</span> Reports</button>
         <button class="nav-item" data-view="staff"><span class="ico">🛡️</span> Manage Staffs</button>
-        <button class="nav-item" data-view="import"><span class="ico">📥</span> Import Data</button>
+        <button class="nav-item nav-parent" data-view="import_parties" data-expands="import"><span class="ico">📥</span> Import Data<span class="caret">▾</span></button>
+        <div class="nav-sub" id="sub-import">
+          <button class="nav-item" data-view="import_parties"><span class="ico">👥</span> Import Parties</button>
+          <button class="nav-item" data-view="import_items"><span class="ico">📦</span> Import Items</button>
+        </div>
         <div class="nav-section">Business Tools</div>
+        <button class="nav-item nav-parent" data-view="business_cards" data-expands="tools"><span class="ico">🛠️</span> Business Tools<span class="caret">▾</span></button>
+        <div class="nav-sub" id="sub-tools">
+          <button class="nav-item" data-view="business_cards"><span class="ico">💼</span> Business Cards</button>
+          <button class="nav-item" data-view="greeting_cards"><span class="ico">🎉</span> Greeting Cards</button>
+          <button class="nav-item" data-view="reminders"><span class="ico">⏰</span> Reminders</button>
+          <button class="nav-item" data-view="bill_gallery"><span class="ico">🖼️</span> Bill Gallery</button>
+          <button class="nav-item" data-view="barcode"><span class="ico">🏷️</span> Barcode Generator</button>
+        </div>
         <button class="nav-item" data-view="refer"><span class="ico">🎁</span> Refer &amp; Win</button>
         <div class="nav-section">Others</div>
         <button class="nav-item" data-view="help"><span class="ico">🆘</span> Help &amp; Support</button>
@@ -66,6 +90,7 @@
   </div>
   <div id="modals"></div>
   <div class="toasts" id="toasts"></div>
+  <script src="/js/qrcode.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>

@@ -9,7 +9,7 @@ const puppeteer = require('puppeteer-core');
   });
   const page = await browser.newPage();
   const errors = [];
-  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); else if (m.text().startsWith('ROUTE') || m.text().startsWith('RENDER')) console.log('  [page] ' + m.text()); });
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
 
   const ok = (name, cond) => console.log((cond ? 'PASS' : 'FAIL') + ' - ' + name);
@@ -59,9 +59,9 @@ const puppeteer = require('puppeteer-core');
   const sections = await page.$$eval('.nav-section', els => els.map(e => e.textContent.trim()));
   ok('menu sections = Business, Management, Business Tools, Others, Settings',
     JSON.stringify(sections) === JSON.stringify(['Business', 'Management', 'Business Tools', 'Others', 'Settings']));
-  const labels = await page.$$eval('.nav-item', els => els.map(e => { const ico = e.querySelector('.ico'); if (ico) ico.remove(); return e.textContent.trim(); }));
-  ok('menu items match Karobar list',
-    JSON.stringify(labels) === JSON.stringify(['Dashboard', 'Parties', 'Inventory', 'Sales', 'Purchase', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Manage Staffs', 'Import Data', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings']));
+  const labels = await page.$$eval('.nav-item', els => els.map(e => { const ico = e.querySelector('.ico'); const car = e.querySelector('.caret'); if (ico) ico.remove(); if (car) car.remove(); return e.textContent.trim(); }));
+  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Sales', 'Sales Invoices', 'Payment In', 'Quotations', 'Sales Return', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Business Tools', 'Business Cards', 'Greeting Cards', 'Reminders', 'Bill Gallery', 'Barcode Generator', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings'];
+  ok('menu items match Karobar list', JSON.stringify(labels) === JSON.stringify(expected));
 
   // 5. parties: add a customer with category
   await goView('parties', 'Parties');
@@ -73,6 +73,16 @@ const puppeteer = require('puppeteer-core');
   await page.waitForFunction(() => !document.querySelector('.modal'), { timeout: 5000 });
   ok('party added', (await page.$$('#view .card')).length >= 1);
   ok('party category badge shown', await page.evaluate(() => document.body.textContent.includes('Retail')));
+
+  // 5b. party modal: photo, payment type, as-of-date, Save & New
+  await page.evaluate(() => { Array.from(document.querySelectorAll('#view button')).find(b => b.textContent.includes('Add party')).click(); });
+  await page.waitForSelector('.modal', { timeout: 5000 });
+  ok('party modal has photo upload', await page.evaluate(() => !!document.querySelector('#p_photo')));
+  ok('party modal has payment type toggle', await page.evaluate(() => Array.from(document.querySelectorAll('#p_paytype button')).map(b => b.textContent.trim()).join('|') === 'To Receive|To Give'));
+  ok('party modal has as-of-date', await page.evaluate(() => !!document.querySelector('#p_asof')));
+  ok('party modal has Save & New', await page.evaluate(() => !!document.querySelector('#saveAndNew')));
+  await page.evaluate(() => document.querySelector('.modal-backdrop [data-close]').click());
+  await page.waitForFunction(() => !document.querySelector('.modal'), { timeout: 5000 });
 
   // 6. sales: add a sale for the customer with discount, VAT and a due date
   await goView('sales', 'Sales');
@@ -92,12 +102,12 @@ const puppeteer = require('puppeteer-core');
   await page.click('#view button.btn-ghost');
   await page.waitForSelector('.modal #invoicePrint', { timeout: 5000 });
   ok('invoice modal renders', (await page.$$('.modal #invoicePrint')).length === 1);
-  ok('invoice has ref number', await page.evaluate(() => document.querySelector('.modal #invoicePrint').textContent.includes('INV-')));
+  ok('invoice has ref number', await page.evaluate(() => /[A-Z]{2,}-\d+/.test(document.querySelector('.modal #invoicePrint').textContent)));
   await page.evaluate(() => document.querySelector('.modal-backdrop [data-close]').click());
 
   // 7. items: add item with category, wholesale & MRP
   await goView('items', 'Inventory');
-  await clickAdd('Add item');
+  await clickAdd('Add New Item');
   await page.type('#i_name', 'Notebook');
   await page.type('#i_cat', 'Stationery');
   await setVal('#i_stock', '50');
@@ -108,6 +118,14 @@ const puppeteer = require('puppeteer-core');
   await page.waitForFunction(() => !document.querySelector('.modal'), { timeout: 5000 });
   ok('item added', (await page.$$('#view tbody tr')).length >= 1);
   ok('category visible in inventory', await page.evaluate(() => document.body.textContent.includes('Stationery')));
+
+  // 7b. inventory toolbar: columns, filters, Import Items, Inventory Settings
+  await page.waitForSelector('#view button[onclick^="inventorySettings"]', { timeout: 5000 });
+  ok('inventory settings button present', true);
+  ok('import items button present', await page.evaluate(() => Array.from(document.querySelectorAll('#view button')).some(b => b.textContent.includes('Import Items'))));
+  ok('item type filter present', await page.evaluate(() => Array.from(document.querySelectorAll('#view select')).some(s => Array.from(s.options).some(o => o.text === 'Service'))));
+  ok('item code column present', await page.evaluate(() => Array.from(document.querySelectorAll('#view thead th')).map(t => t.textContent.trim()).includes('Item Code')));
+  ok('type column present', await page.evaluate(() => Array.from(document.querySelectorAll('#view thead th')).map(t => t.textContent.trim()).includes('Type')));
 
   // 8. purchase view renders
   await goView('purchase', 'Purchases');
@@ -156,10 +174,32 @@ const puppeteer = require('puppeteer-core');
   // 14. staff
   await goView('staff', 'Staff');
 
-  // 15. import data
-  await goView('import', 'Import Data');
+  // 15. import data (submenu: import parties then import items)
+  await goView('import_parties', 'Import Parties');
+  await goView('import_items', 'Import Items');
+  await page.waitForSelector('#view #impItems', { timeout: 5000 });
+  ok('import items view has upload input', true);
 
-  // 16. refer & win
+  // 16. business tools submenu
+  await goView('business_cards', 'Business Cards');
+  await page.waitForSelector('#view #bc_party', { timeout: 5000 });
+  ok('business card generator renders', true);
+  await goView('greeting_cards', 'Greeting Cards');
+  await page.waitForSelector('#view #gr_party', { timeout: 5000 });
+  ok('greeting card templates present', await page.evaluate(() => !!document.querySelector('#view #gr_party')));
+  await goView('reminders', 'Reminders');
+  await goView('bill_gallery', 'Bill Gallery');
+  ok('bill gallery upload present', await page.evaluate(() => !!document.querySelector('#view input[type=file]')));
+  await goView('barcode', 'Barcode Generator');
+  await page.waitForSelector('#view #bc_code', { timeout: 5000 });
+  ok('barcode generator has value input', true);
+
+  // 16b. submenu expand/collapse
+  await page.click('.nav-parent[data-expands="sales"]');
+  ok('sales submenu collapses on parent click', await page.evaluate(() => !document.getElementById('sub-sales').classList.contains('open')));
+  await page.click('.nav-parent[data-expands="sales"]');
+
+  // 17. refer & win
   await goView('refer', 'Refer & Win');
   ok('referral code shown', (await page.evaluate(() => document.body.textContent.includes('referral code'))));
 

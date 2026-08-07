@@ -117,20 +117,20 @@ app.get('/api/summary', auth(), (req, res) => {
   const t = (sql) => db.prepare(sql).get(b);
   const today = new Date().toISOString().slice(0, 10);
   const todayRow = db.prepare(`SELECT type, COALESCE(SUM(amount),0) amt FROM transactions WHERE business_id=? AND date=? GROUP BY type`).all(b, today);
-  const todayTotals = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0 };
+  const todayTotals = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0, quotation: 0, sales_return: 0, purchase_return: 0 };
   todayRow.forEach(r => todayTotals[r.type] = r.amt);
 
   const recv = db.prepare(`SELECT COALESCE(SUM(p.opening_balance),0) ob FROM parties p WHERE p.business_id=? AND p.type='customer'`).get(b).ob
-    + db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type='sale' THEN t.amount WHEN t.type='payment_in' THEN -t.amount ELSE 0 END),0) v FROM transactions t WHERE t.business_id=? AND t.type IN ('sale','payment_in')`).get(b).v;
+    + db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type='sale' THEN t.amount WHEN t.type IN ('payment_in','sales_return') THEN -t.amount ELSE 0 END),0) v FROM transactions t WHERE t.business_id=? AND t.type IN ('sale','payment_in','sales_return')`).get(b).v;
   const pay = db.prepare(`SELECT COALESCE(SUM(p.opening_balance),0) ob FROM parties p WHERE p.business_id=? AND p.type='supplier'`).get(b).ob
-    + db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type='purchase' THEN t.amount WHEN t.type='payment_out' THEN -t.amount ELSE 0 END),0) v FROM transactions t WHERE t.business_id=? AND t.type IN ('purchase','payment_out')`).get(b).v;
+    + db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type='purchase' THEN t.amount WHEN t.type IN ('payment_out','purchase_return') THEN -t.amount ELSE 0 END),0) v FROM transactions t WHERE t.business_id=? AND t.type IN ('purchase','payment_out','purchase_return')`).get(b).v;
 
   const recent = db.prepare(`SELECT t.*, p.name party_name, i.name item_name FROM transactions t
     LEFT JOIN parties p ON p.id = t.party_id LEFT JOIN items i ON i.id = t.item_id
     WHERE t.business_id=? ORDER BY t.date DESC, t.id DESC LIMIT 8`).all(b);
 
   const todayCounts = db.prepare(`SELECT type, COUNT(*) c FROM transactions WHERE business_id=? AND date=? GROUP BY type`).all(b, today);
-  const tCounts = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0 };
+  const tCounts = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0, quotation: 0, sales_return: 0, purchase_return: 0 };
   todayCounts.forEach(r => tCounts[r.type] = r.c);
 
   const lowStock = db.prepare(`SELECT * FROM items WHERE business_id=? AND stock <= low_stock AND low_stock > 0 ORDER BY stock ASC LIMIT 6`).all(b);
@@ -151,7 +151,7 @@ app.get('/api/parties', auth(), (req, res) => {
   if (q) { sql += ' AND (name LIKE ? OR address LIKE ? OR phone LIKE ?)'; params.push('%' + q + '%', '%' + q + '%', '%' + q + '%'); }
   sql += ' ORDER BY name COLLATE NOCASE';
   const parties = db.prepare(sql).all(...params).map(p => {
-    const t = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type IN ('sale','purchase') THEN amount WHEN type IN ('payment_in','payment_out') THEN -amount ELSE 0 END),0) v FROM transactions WHERE business_id=? AND party_id=?`).get(req.business.id, p.id).v;
+    const t = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type IN ('sale','purchase') THEN amount WHEN type IN ('payment_in','payment_out','sales_return','purchase_return') THEN -amount ELSE 0 END),0) v FROM transactions WHERE business_id=? AND party_id=?`).get(req.business.id, p.id).v;
     const balance = Math.round((p.opening_balance + t) * 100) / 100;
     return { ...p, balance };
   });
@@ -159,20 +159,20 @@ app.get('/api/parties', auth(), (req, res) => {
 });
 
 app.post('/api/parties', auth(), (req, res) => {
-  const { type, name, phone, email, address, opening_balance, note, category } = req.body;
+  const { type, name, phone, email, address, opening_balance, note, category, photo, pay_type, as_of_date } = req.body;
   if (!['customer', 'supplier'].includes(type)) return bad('Invalid type')(res);
   if (!name || !String(name).trim()) return bad('Name is required')(res);
-  const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(req.business.id, type, String(name).trim(), phone || '', email || '', address || '', Number(opening_balance) || 0, note || '', category || '');
+  const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category, photo, pay_type, as_of_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(req.business.id, type, String(name).trim(), phone || '', email || '', address || '', Number(opening_balance) || 0, note || '', category || '', photo || '', ['receive', 'give'].includes(pay_type) ? pay_type : 'receive', as_of_date || '');
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
 app.put('/api/parties/:id', auth(), (req, res) => {
   const p = db.prepare('SELECT * FROM parties WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
   if (!p) return bad('Party not found')(res);
-  const { type, name, phone, email, address, opening_balance, note, category } = req.body;
-  db.prepare('UPDATE parties SET type=?, name=?, phone=?, email=?, address=?, opening_balance=?, note=?, category=? WHERE id=?')
-    .run(type || p.type, name || p.name, phone ?? p.phone, email ?? p.email, address ?? p.address, Number(opening_balance ?? p.opening_balance), note ?? p.note, category ?? p.category, p.id);
+  const { type, name, phone, email, address, opening_balance, note, category, photo, pay_type, as_of_date } = req.body;
+  db.prepare('UPDATE parties SET type=?, name=?, phone=?, email=?, address=?, opening_balance=?, note=?, category=?, photo=?, pay_type=?, as_of_date=? WHERE id=?')
+    .run(type || p.type, name || p.name, phone ?? p.phone, email ?? p.email, address ?? p.address, Number(opening_balance ?? p.opening_balance), note ?? p.note, category ?? p.category, photo ?? p.photo, ['receive', 'give'].includes(pay_type) ? pay_type : p.pay_type, as_of_date ?? p.as_of_date, p.id);
   res.json({ ok: true });
 });
 
@@ -201,7 +201,8 @@ app.get('/api/parties/:id/ledger', auth(), (req, res) => {
     WHERE t.business_id=? AND t.party_id=? ORDER BY t.date ASC, t.id ASC`).all(req.business.id, p.id);
   let running = p.opening_balance;
   const lines = rows.map(r => {
-    const delta = ['sale', 'purchase'].includes(r.type) ? r.amount : -r.amount;
+    const effect = balEffect(r.type);
+    const delta = effect === 'add' ? r.amount : (effect === 'sub' ? -r.amount : 0);
     running = Math.round((running + delta) * 100) / 100;
     return { ...r, delta, balance: running };
   });
@@ -211,29 +212,34 @@ app.get('/api/parties/:id/ledger', auth(), (req, res) => {
 /* ---------------- Items ---------------- */
 
 app.get('/api/items', auth(), (req, res) => {
-  const { q, category } = req.query;
+  const { q, category, type, stock, sort } = req.query;
   let sql = 'SELECT * FROM items WHERE business_id=?';
   const params = [req.business.id];
   if (category) { sql += ' AND category=?'; params.push(category); }
-  if (q) { sql += ' AND name LIKE ?'; params.push('%' + q + '%'); }
-  sql += ' ORDER BY name COLLATE NOCASE';
+  if (type) { sql += ' AND type=?'; params.push(type); }
+  if (stock === 'low') sql += ' AND low_stock > 0 AND stock <= low_stock';
+  else if (stock === 'out') sql += ' AND stock <= 0';
+  else if (stock === 'in') sql += ' AND stock > 0';
+  if (q) { sql += ' AND (name LIKE ? OR code LIKE ?)'; params.push('%' + q + '%', '%' + q + '%'); }
+  const order = { name: 'name COLLATE NOCASE', stock: 'stock ASC', sale_price: 'sale_price DESC', purchase_price: 'purchase_price DESC', recent: 'id DESC' }[sort] || 'name COLLATE NOCASE';
+  sql += ' ORDER BY ' + order;
   res.json({ items: db.prepare(sql).all(...params) });
 });
 
 app.post('/api/items', auth(), (req, res) => {
-  const { name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock } = req.body;
+  const { name, unit, category, code, type, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock } = req.body;
   if (!name || !String(name).trim()) return bad('Item name is required')(res);
-  const r = db.prepare('INSERT INTO items (business_id, name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .run(req.business.id, String(name).trim(), unit || 'pcs', category || '', Number(purchase_price) || 0, Number(wholesale_price) || 0, Number(sale_price) || 0, Number(mrp) || 0, Number(stock) || 0, Number(low_stock) || 0);
+  const r = db.prepare('INSERT INTO items (business_id, name, unit, category, code, type, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(req.business.id, String(name).trim(), unit || 'pcs', category || '', code || '', ['goods', 'service'].includes(type) ? type : 'goods', Number(purchase_price) || 0, Number(wholesale_price) || 0, Number(sale_price) || 0, Number(mrp) || 0, Number(stock) || 0, Number(low_stock) || 0);
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
 app.put('/api/items/:id', auth(), (req, res) => {
   const it = db.prepare('SELECT * FROM items WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
   if (!it) return bad('Item not found')(res);
-  const { name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock } = req.body;
-  db.prepare('UPDATE items SET name=?, unit=?, category=?, purchase_price=?, wholesale_price=?, sale_price=?, mrp=?, stock=?, low_stock=? WHERE id=?')
-    .run(name || it.name, unit || it.unit, category ?? it.category, Number(purchase_price ?? it.purchase_price), Number(wholesale_price ?? it.wholesale_price), Number(sale_price ?? it.sale_price), Number(mrp ?? it.mrp), Number(stock ?? it.stock), Number(low_stock ?? it.low_stock), it.id);
+  const { name, unit, category, code, type, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock } = req.body;
+  db.prepare('UPDATE items SET name=?, unit=?, category=?, code=?, type=?, purchase_price=?, wholesale_price=?, sale_price=?, mrp=?, stock=?, low_stock=? WHERE id=?')
+    .run(name || it.name, unit || it.unit, category ?? it.category, code ?? it.code, ['goods', 'service'].includes(type) ? type : it.type, Number(purchase_price ?? it.purchase_price), Number(wholesale_price ?? it.wholesale_price), Number(sale_price ?? it.sale_price), Number(mrp ?? it.mrp), Number(stock ?? it.stock), Number(low_stock ?? it.low_stock), it.id);
   res.json({ ok: true });
 });
 
@@ -246,14 +252,26 @@ app.delete('/api/items/:id', auth(), (req, res) => {
 
 /* ---------------- Transactions ---------------- */
 
+const TXN_TYPES = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income', 'quotation', 'sales_return', 'purchase_return'];
+/* Returns +1, -1 or 0 stock multiplier for a transaction type. */
+function stockMult(type) {
+  if (type === 'sale' || type === 'purchase_return') return -1;
+  if (type === 'purchase' || type === 'sales_return') return 1;
+  return 0;
+}
+/* Returns 'add', 'sub' or 'none' for party-balance effect of a transaction type. */
+function balEffect(type) {
+  if (type === 'sale' || type === 'purchase') return 'add';
+  if (type === 'payment_in' || type === 'payment_out' || type === 'sales_return' || type === 'purchase_return') return 'sub';
+  return 'none';
+}
 function adjustStock(itemId, delta) {
   db.prepare('UPDATE items SET stock = stock + ? WHERE id=?').run(delta, itemId);
 }
 
 app.post('/api/transactions', auth(), (req, res) => {
   const { type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note } = req.body;
-  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income'];
-  if (!allowed.includes(type)) return bad('Invalid transaction type')(res);
+  if (!TXN_TYPES.includes(type)) return bad('Invalid transaction type')(res);
   const d = date || new Date().toISOString().slice(0, 10);
   const amt = Number(amount) || 0;
   if (amt <= 0) return bad('Amount must be greater than zero')(res);
@@ -272,8 +290,8 @@ app.post('/api/transactions', auth(), (req, res) => {
     const refNo = prefix + '-' + String(r.lastInsertRowid).padStart(6, '0');
     db.prepare('UPDATE transactions SET ref_no=? WHERE id=?').run(refNo, r.lastInsertRowid);
     if (txn.item_id) {
-      if (type === 'sale') adjustStock(txn.item_id, -txn.quantity);
-      if (type === 'purchase') adjustStock(txn.item_id, txn.quantity);
+      const m = stockMult(type);
+      if (m) adjustStock(txn.item_id, m * txn.quantity);
     }
     commit();
     res.json({ ok: true, id: r.lastInsertRowid, ref_no: refNo });
@@ -305,22 +323,21 @@ app.get('/api/transactions', auth(), (req, res) => {
 app.put('/api/transactions/:id', auth(), (req, res) => {
   const old = db.prepare('SELECT * FROM transactions WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
   if (!old) return bad('Transaction not found')(res);
-  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income'];
   const type = req.body.type || old.type;
-  if (!allowed.includes(type)) return bad('Invalid transaction type')(res);
+  if (!TXN_TYPES.includes(type)) return bad('Invalid transaction type')(res);
   const amt = Number(req.body.amount ?? old.amount) || 0;
   const quantity = Number(req.body.quantity ?? old.quantity) || 0;
 
   // revert old stock effect, then apply new one
   const revert = (t) => {
     if (!t.item_id) return;
-    if (t.type === 'sale') adjustStock(t.item_id, t.quantity);
-    if (t.type === 'purchase') adjustStock(t.item_id, -t.quantity);
+    const m = stockMult(t.type);
+    if (m) adjustStock(t.item_id, -m * t.quantity);
   };
   const apply = (t) => {
     if (!t.item_id) return;
-    if (t.type === 'sale') adjustStock(t.item_id, -t.quantity);
-    if (t.type === 'purchase') adjustStock(t.item_id, t.quantity);
+    const m = stockMult(t.type);
+    if (m) adjustStock(t.item_id, m * t.quantity);
   };
 
   begin();
@@ -365,8 +382,8 @@ app.delete('/api/transactions/:id', auth(), (req, res) => {
   begin();
   try {
     if (old.item_id) {
-      if (old.type === 'sale') adjustStock(old.item_id, old.quantity);
-      if (old.type === 'purchase') adjustStock(old.item_id, -old.quantity);
+      const m = stockMult(old.type);
+      if (m) adjustStock(old.item_id, -m * old.quantity);
     }
     db.prepare('DELETE FROM transactions WHERE id=?').run(old.id);
     commit();
@@ -388,7 +405,7 @@ app.get('/api/reports', auth(), (req, res) => {
   const cond = where.join(' AND ');
 
   const totals = db.prepare(`SELECT t.type, COALESCE(SUM(t.amount),0) amt FROM transactions t WHERE ${cond} GROUP BY t.type`).all(...params);
-  const byType = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0 };
+  const byType = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0, quotation: 0, sales_return: 0, purchase_return: 0 };
   totals.forEach(r => byType[r.type] = r.amt);
 
   const topItems = db.prepare(`SELECT i.name, i.unit, COALESCE(SUM(t.quantity),0) qty, COALESCE(SUM(t.amount),0) amt
@@ -405,7 +422,6 @@ app.get('/api/reports', auth(), (req, res) => {
   const discountRow = db.prepare(`SELECT COALESCE(SUM(t.discount),0) discount FROM transactions t WHERE ${cond} AND t.type IN ('sale','purchase')`).get(...params);
 
   const profit = byType.sale + byType.other_income - byType.purchase - byType.expense;
-
   res.json({ from, to, byType, profit, vat: vatRow.vat, discount: discountRow.discount, topItems, topCustomers, expenseByNote });
 });
 
@@ -418,8 +434,8 @@ app.get('/api/daybook', auth(), (req, res) => {
     LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
     WHERE t.business_id=? AND t.date=? ORDER BY t.id`).all(req.business.id, d);
   const total = db.prepare(`SELECT
-      COALESCE(SUM(CASE WHEN t.type IN ('sale','payment_in','other_income') THEN t.amount ELSE 0 END),0) inflow,
-      COALESCE(SUM(CASE WHEN t.type IN ('purchase','payment_out','expense') THEN t.amount ELSE 0 END),0) outflow
+      COALESCE(SUM(CASE WHEN t.type IN ('sale','payment_in','other_income','purchase_return') THEN t.amount ELSE 0 END),0) inflow,
+      COALESCE(SUM(CASE WHEN t.type IN ('purchase','payment_out','expense','sales_return') THEN t.amount ELSE 0 END),0) outflow
     FROM transactions t WHERE t.business_id=? AND t.date=?`).get(req.business.id, d);
   res.json({ date: d, transactions: rows, inflow: total.inflow, outflow: total.outflow });
 });
@@ -477,14 +493,14 @@ app.post('/api/import', auth(), (req, res) => {
     db.prepare('DELETE FROM parties WHERE business_id=?').run(b);
     db.prepare('DELETE FROM items WHERE business_id=?').run(b);
     for (const p of data.parties) {
-      const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-        .run(b, p.type, p.name, p.phone || '', p.email || '', p.address || '', p.opening_balance || 0, p.note || '', p.category || '', p.created_at || new Date().toISOString());
+      const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category, photo, pay_type, as_of_date, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(b, p.type, p.name, p.phone || '', p.email || '', p.address || '', p.opening_balance || 0, p.note || '', p.category || '', p.photo || '', ['receive', 'give'].includes(p.pay_type) ? p.pay_type : 'receive', p.as_of_date || '', p.created_at || new Date().toISOString());
       idMap['p' + p.id] = r.lastInsertRowid;
     }
     const itemMap = {};
     for (const it of data.items) {
-      const r = db.prepare('INSERT INTO items (business_id, name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-        .run(b, it.name, it.unit || 'pcs', it.category || '', it.purchase_price || 0, it.wholesale_price || 0, it.sale_price || 0, it.mrp || 0, it.stock || 0, it.low_stock || 0, it.created_at || new Date().toISOString());
+      const r = db.prepare('INSERT INTO items (business_id, name, unit, category, code, type, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(b, it.name, it.unit || 'pcs', it.category || '', it.code || '', ['goods', 'service'].includes(it.type) ? it.type : 'goods', it.purchase_price || 0, it.wholesale_price || 0, it.sale_price || 0, it.mrp || 0, it.stock || 0, it.low_stock || 0, it.created_at || new Date().toISOString());
       itemMap['i' + it.id] = r.lastInsertRowid;
     }
     for (const t of data.transactions) {
@@ -506,8 +522,7 @@ app.get('/api/accounts', auth(), (req, res) => {
   const rows = db.prepare(`SELECT payment_method,
     COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income') THEN amount ELSE 0 END),0) tin,
     COALESCE(SUM(CASE WHEN type IN ('purchase','expense','payment_out') THEN amount ELSE 0 END),0) tout
-    FROM transactions WHERE business_id=? GROUP BY payment_method`).all(b);
-  const sums = {};
+    FROM transactions WHERE business_id=? GROUP BY payment_method`).all(b);  const sums = {};
   rows.forEach(r => { if (r.payment_method) sums[r.payment_method] = r; });
   const accounts = db.prepare('SELECT * FROM accounts WHERE business_id=? ORDER BY name COLLATE NOCASE').all(b);
   const seen = {};
@@ -580,13 +595,12 @@ app.post('/api/import/csv/transactions', auth(), (req, res) => {
   const list = req.body;
   if (!Array.isArray(list)) return bad('Invalid payload')(res);
   const b = req.business.id;
-  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income'];
   let count = 0;
   begin();
   try {
     for (const t of list) {
       const type = String(t.type || '').toLowerCase();
-      if (!allowed.includes(type)) continue;
+      if (!TXN_TYPES.includes(type)) continue;
       const amount = Number(t.amount);
       if (!(amount > 0)) continue;
       let partyId = null;
@@ -606,9 +620,31 @@ app.post('/api/import/csv/transactions', auth(), (req, res) => {
       if (t.ref_no) db.prepare('UPDATE transactions SET ref_no=? WHERE id=?').run(String(t.ref_no), r.lastInsertRowid);
       else db.prepare("UPDATE transactions SET ref_no=(SELECT COALESCE(invoice_prefix,'INV') FROM businesses WHERE id=?1) || '-' || printf('%06d',?2) WHERE id=?2").run(b, r.lastInsertRowid);
       if (itemId) {
-        if (type === 'sale') adjustStock(itemId, -quantity);
-        if (type === 'purchase') adjustStock(itemId, quantity);
+        const m = stockMult(type);
+        if (m) adjustStock(itemId, m * quantity);
       }
+      count++;
+    }
+    commit();
+    res.json({ ok: true, count });
+  } catch (e) {
+    rollback();
+    bad('Import failed: invalid data')(res);
+  }
+});
+
+app.post('/api/import/csv/items', auth(), (req, res) => {
+  const list = req.body;
+  if (!Array.isArray(list)) return bad('Invalid payload')(res);
+  const b = req.business.id;
+  let count = 0;
+  begin();
+  try {
+    for (const it of list) {
+      const name = String(it.name || '').trim();
+      if (!name) continue;
+      db.prepare('INSERT INTO items (business_id, name, unit, category, code, type, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(b, name, it.unit || 'pcs', it.category || '', String(it.code || ''), ['goods', 'service'].includes(String(it.type || '').toLowerCase()) ? String(it.type).toLowerCase() : 'goods', Number(it.purchase_price) || 0, Number(it.wholesale_price) || 0, Number(it.sale_price) || 0, Number(it.mrp) || 0, Number(it.stock) || 0, Number(it.low_stock) || 0);
       count++;
     }
     commit();
