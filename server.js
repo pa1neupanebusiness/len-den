@@ -103,10 +103,10 @@ app.get('/api/me', auth(), (req, res) => {
 /* ---------------- Business ---------------- */
 
 app.put('/api/business', auth(), (req, res) => {
-  const { name, owner_name, phone, address, currency, fiscal_year_start } = req.body;
+  const { name, owner_name, phone, address, currency, fiscal_year_start, invoice_prefix } = req.body;
   if (!name || !String(name).trim()) return bad('Business name is required')(res);
-  db.prepare('UPDATE businesses SET name=?, owner_name=?, phone=?, address=?, currency=?, fiscal_year_start=? WHERE id=?')
-    .run(String(name).trim(), owner_name || '', phone || '', address || '', currency || 'NPR', fiscal_year_start || '2025-04-01', req.business.id);
+  db.prepare('UPDATE businesses SET name=?, owner_name=?, phone=?, address=?, currency=?, fiscal_year_start=?, invoice_prefix=? WHERE id=?')
+    .run(String(name).trim(), owner_name || '', phone || '', address || '', currency || 'NPR', fiscal_year_start || '2025-04-01', String(invoice_prefix || 'INV').trim().replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'INV', req.business.id);
   res.json({ ok: true, business: getBusiness(req.business.id) });
 });
 
@@ -117,7 +117,7 @@ app.get('/api/summary', auth(), (req, res) => {
   const t = (sql) => db.prepare(sql).get(b);
   const today = new Date().toISOString().slice(0, 10);
   const todayRow = db.prepare(`SELECT type, COALESCE(SUM(amount),0) amt FROM transactions WHERE business_id=? AND date=? GROUP BY type`).all(b, today);
-  const todayTotals = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0 };
+  const todayTotals = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0 };
   todayRow.forEach(r => todayTotals[r.type] = r.amt);
 
   const recv = db.prepare(`SELECT COALESCE(SUM(p.opening_balance),0) ob FROM parties p WHERE p.business_id=? AND p.type='customer'`).get(b).ob
@@ -130,7 +130,7 @@ app.get('/api/summary', auth(), (req, res) => {
     WHERE t.business_id=? ORDER BY t.date DESC, t.id DESC LIMIT 8`).all(b);
 
   const todayCounts = db.prepare(`SELECT type, COUNT(*) c FROM transactions WHERE business_id=? AND date=? GROUP BY type`).all(b, today);
-  const tCounts = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0 };
+  const tCounts = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0 };
   todayCounts.forEach(r => tCounts[r.type] = r.c);
 
   const lowStock = db.prepare(`SELECT * FROM items WHERE business_id=? AND stock <= low_stock AND low_stock > 0 ORDER BY stock ASC LIMIT 6`).all(b);
@@ -143,11 +143,12 @@ app.get('/api/summary', auth(), (req, res) => {
 /* ---------------- Parties ---------------- */
 
 app.get('/api/parties', auth(), (req, res) => {
-  const { type, q } = req.query;
+  const { type, q, category } = req.query;
   let sql = 'SELECT * FROM parties WHERE business_id=?';
   const params = [req.business.id];
   if (type) { sql += ' AND type=?'; params.push(type); }
-  if (q) { sql += ' AND name LIKE ?'; params.push('%' + q + '%'); }
+  if (category) { sql += ' AND category=?'; params.push(category); }
+  if (q) { sql += ' AND (name LIKE ? OR address LIKE ? OR phone LIKE ?)'; params.push('%' + q + '%', '%' + q + '%', '%' + q + '%'); }
   sql += ' ORDER BY name COLLATE NOCASE';
   const parties = db.prepare(sql).all(...params).map(p => {
     const t = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type IN ('sale','purchase') THEN amount WHEN type IN ('payment_in','payment_out') THEN -amount ELSE 0 END),0) v FROM transactions WHERE business_id=? AND party_id=?`).get(req.business.id, p.id).v;
@@ -158,21 +159,31 @@ app.get('/api/parties', auth(), (req, res) => {
 });
 
 app.post('/api/parties', auth(), (req, res) => {
-  const { type, name, phone, email, address, opening_balance, note } = req.body;
+  const { type, name, phone, email, address, opening_balance, note, category } = req.body;
   if (!['customer', 'supplier'].includes(type)) return bad('Invalid type')(res);
   if (!name || !String(name).trim()) return bad('Name is required')(res);
-  const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note) VALUES (?,?,?,?,?,?,?,?)')
-    .run(req.business.id, type, String(name).trim(), phone || '', email || '', address || '', Number(opening_balance) || 0, note || '');
+  const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(req.business.id, type, String(name).trim(), phone || '', email || '', address || '', Number(opening_balance) || 0, note || '', category || '');
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
 app.put('/api/parties/:id', auth(), (req, res) => {
   const p = db.prepare('SELECT * FROM parties WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
   if (!p) return bad('Party not found')(res);
-  const { type, name, phone, email, address, opening_balance, note } = req.body;
-  db.prepare('UPDATE parties SET type=?, name=?, phone=?, email=?, address=?, opening_balance=?, note=? WHERE id=?')
-    .run(type || p.type, name || p.name, phone ?? p.phone, email ?? p.email, address ?? p.address, Number(opening_balance ?? p.opening_balance), note ?? p.note, p.id);
+  const { type, name, phone, email, address, opening_balance, note, category } = req.body;
+  db.prepare('UPDATE parties SET type=?, name=?, phone=?, email=?, address=?, opening_balance=?, note=?, category=? WHERE id=?')
+    .run(type || p.type, name || p.name, phone ?? p.phone, email ?? p.email, address ?? p.address, Number(opening_balance ?? p.opening_balance), note ?? p.note, category ?? p.category, p.id);
   res.json({ ok: true });
+});
+
+app.put('/api/parties/:id/balance', auth(), (req, res) => {
+  const p = db.prepare('SELECT * FROM parties WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!p) return bad('Party not found')(res);
+  const delta = Number(req.body.delta) || 0;
+  if (delta === 0) return res.json({ ok: true, party: p });
+  db.prepare('UPDATE parties SET opening_balance = opening_balance + ? WHERE id=?').run(delta, p.id);
+  const updated = db.prepare('SELECT * FROM parties WHERE id=?').get(p.id);
+  res.json({ ok: true, party: updated });
 });
 
 app.delete('/api/parties/:id', auth(), (req, res) => {
@@ -200,28 +211,29 @@ app.get('/api/parties/:id/ledger', auth(), (req, res) => {
 /* ---------------- Items ---------------- */
 
 app.get('/api/items', auth(), (req, res) => {
-  const { q } = req.query;
+  const { q, category } = req.query;
   let sql = 'SELECT * FROM items WHERE business_id=?';
   const params = [req.business.id];
+  if (category) { sql += ' AND category=?'; params.push(category); }
   if (q) { sql += ' AND name LIKE ?'; params.push('%' + q + '%'); }
   sql += ' ORDER BY name COLLATE NOCASE';
   res.json({ items: db.prepare(sql).all(...params) });
 });
 
 app.post('/api/items', auth(), (req, res) => {
-  const { name, unit, purchase_price, sale_price, stock, low_stock } = req.body;
+  const { name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock } = req.body;
   if (!name || !String(name).trim()) return bad('Item name is required')(res);
-  const r = db.prepare('INSERT INTO items (business_id, name, unit, purchase_price, sale_price, stock, low_stock) VALUES (?,?,?,?,?,?,?)')
-    .run(req.business.id, String(name).trim(), unit || 'pcs', Number(purchase_price) || 0, Number(sale_price) || 0, Number(stock) || 0, Number(low_stock) || 0);
+  const r = db.prepare('INSERT INTO items (business_id, name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(req.business.id, String(name).trim(), unit || 'pcs', category || '', Number(purchase_price) || 0, Number(wholesale_price) || 0, Number(sale_price) || 0, Number(mrp) || 0, Number(stock) || 0, Number(low_stock) || 0);
   res.json({ ok: true, id: r.lastInsertRowid });
 });
 
 app.put('/api/items/:id', auth(), (req, res) => {
   const it = db.prepare('SELECT * FROM items WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
   if (!it) return bad('Item not found')(res);
-  const { name, unit, purchase_price, sale_price, stock, low_stock } = req.body;
-  db.prepare('UPDATE items SET name=?, unit=?, purchase_price=?, sale_price=?, stock=?, low_stock=? WHERE id=?')
-    .run(name || it.name, unit || it.unit, Number(purchase_price ?? it.purchase_price), Number(sale_price ?? it.sale_price), Number(stock ?? it.stock), Number(low_stock ?? it.low_stock), it.id);
+  const { name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock } = req.body;
+  db.prepare('UPDATE items SET name=?, unit=?, category=?, purchase_price=?, wholesale_price=?, sale_price=?, mrp=?, stock=?, low_stock=? WHERE id=?')
+    .run(name || it.name, unit || it.unit, category ?? it.category, Number(purchase_price ?? it.purchase_price), Number(wholesale_price ?? it.wholesale_price), Number(sale_price ?? it.sale_price), Number(mrp ?? it.mrp), Number(stock ?? it.stock), Number(low_stock ?? it.low_stock), it.id);
   res.json({ ok: true });
 });
 
@@ -239,24 +251,32 @@ function adjustStock(itemId, delta) {
 }
 
 app.post('/api/transactions', auth(), (req, res) => {
-  const { type, date, party_id, item_id, quantity, rate, amount, payment_method, note } = req.body;
-  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out'];
+  const { type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note } = req.body;
+  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income'];
   if (!allowed.includes(type)) return bad('Invalid transaction type')(res);
   const d = date || new Date().toISOString().slice(0, 10);
   const amt = Number(amount) || 0;
   if (amt <= 0) return bad('Amount must be greater than zero')(res);
 
-  const txn = { type, date: d, party_id: party_id || null, item_id: item_id || null, quantity: Number(quantity) || 0, rate: Number(rate) || 0, amount: amt, payment_method: payment_method || '', note: note || '' };
+  const txn = {
+    type, date: d, party_id: party_id || null, item_id: item_id || null,
+    quantity: Number(quantity) || 0, rate: Number(rate) || 0, amount: amt,
+    discount: Number(discount) || 0, vat_percent: Number(vat_percent) || 0,
+    reminder_date: reminder_date || '', payment_method: payment_method || '', note: note || '',
+  };
   begin();
   try {
-    const r = db.prepare(`INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, payment_method, note) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-      .run(req.business.id, txn.type, txn.date, txn.party_id, txn.item_id, txn.quantity, txn.rate, txn.amount, txn.payment_method, txn.note);
+    const r = db.prepare(`INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(req.business.id, txn.type, txn.date, txn.party_id, txn.item_id, txn.quantity, txn.rate, txn.amount, txn.discount, txn.vat_percent, txn.reminder_date, txn.payment_method, txn.note);
+    const prefix = (req.business.invoice_prefix || 'INV').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'INV';
+    const refNo = prefix + '-' + String(r.lastInsertRowid).padStart(6, '0');
+    db.prepare('UPDATE transactions SET ref_no=? WHERE id=?').run(refNo, r.lastInsertRowid);
     if (txn.item_id) {
       if (type === 'sale') adjustStock(txn.item_id, -txn.quantity);
       if (type === 'purchase') adjustStock(txn.item_id, txn.quantity);
     }
     commit();
-    res.json({ ok: true, id: r.lastInsertRowid });
+    res.json({ ok: true, id: r.lastInsertRowid, ref_no: refNo });
   } catch (e) {
     rollback();
     bad('Failed to save transaction')(res);
@@ -285,7 +305,7 @@ app.get('/api/transactions', auth(), (req, res) => {
 app.put('/api/transactions/:id', auth(), (req, res) => {
   const old = db.prepare('SELECT * FROM transactions WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
   if (!old) return bad('Transaction not found')(res);
-  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out'];
+  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income'];
   const type = req.body.type || old.type;
   if (!allowed.includes(type)) return bad('Invalid transaction type')(res);
   const amt = Number(req.body.amount ?? old.amount) || 0;
@@ -314,18 +334,29 @@ app.put('/api/transactions/:id', auth(), (req, res) => {
       quantity,
       rate: Number(req.body.rate ?? old.rate) || 0,
       amount: amt,
+      discount: Number(req.body.discount ?? old.discount) || 0,
+      vat_percent: Number(req.body.vat_percent ?? old.vat_percent) || 0,
+      reminder_date: req.body.reminder_date ?? old.reminder_date,
       payment_method: req.body.payment_method ?? old.payment_method,
       note: req.body.note ?? old.note,
     };
     apply(next);
-    db.prepare('UPDATE transactions SET type=?, date=?, party_id=?, item_id=?, quantity=?, rate=?, amount=?, payment_method=?, note=? WHERE id=?')
-      .run(next.type, next.date, next.party_id, next.item_id, next.quantity, next.rate, next.amount, next.payment_method, next.note, old.id);
+    db.prepare('UPDATE transactions SET type=?, date=?, party_id=?, item_id=?, quantity=?, rate=?, amount=?, discount=?, vat_percent=?, reminder_date=?, payment_method=?, note=? WHERE id=?')
+      .run(next.type, next.date, next.party_id, next.item_id, next.quantity, next.rate, next.amount, next.discount, next.vat_percent, next.reminder_date, next.payment_method, next.note, old.id);
     commit();
     res.json({ ok: true });
   } catch (e) {
     rollback();
     bad('Failed to update transaction')(res);
   }
+});
+
+app.get('/api/transactions/:id', auth(), (req, res) => {
+  const t = db.prepare(`SELECT t.*, p.name party_name, p.phone party_phone, p.address party_address, i.name item_name, i.unit item_unit FROM transactions t
+    LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+    WHERE t.id=? AND t.business_id=?`).get(req.params.id, req.business.id);
+  if (!t) return bad('Transaction not found')(res);
+  res.json({ transaction: t, business: getBusiness(req.business.id) });
 });
 
 app.delete('/api/transactions/:id', auth(), (req, res) => {
@@ -357,7 +388,7 @@ app.get('/api/reports', auth(), (req, res) => {
   const cond = where.join(' AND ');
 
   const totals = db.prepare(`SELECT t.type, COALESCE(SUM(t.amount),0) amt FROM transactions t WHERE ${cond} GROUP BY t.type`).all(...params);
-  const byType = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0 };
+  const byType = { sale: 0, purchase: 0, expense: 0, payment_in: 0, payment_out: 0, other_income: 0 };
   totals.forEach(r => byType[r.type] = r.amt);
 
   const topItems = db.prepare(`SELECT i.name, i.unit, COALESCE(SUM(t.quantity),0) qty, COALESCE(SUM(t.amount),0) amt
@@ -370,9 +401,27 @@ app.get('/api/reports', auth(), (req, res) => {
 
   const expenseByNote = db.prepare(`SELECT COALESCE(t.note,'General') name, SUM(t.amount) amt FROM transactions t WHERE ${cond} AND t.type='expense' GROUP BY t.note ORDER BY amt DESC LIMIT 10`).all(...params);
 
-  const profit = byType.sale - byType.purchase - byType.expense;
+  const vatRow = db.prepare(`SELECT COALESCE(SUM(t.vat_percent * t.amount / 100),0) vat FROM transactions t WHERE ${cond} AND t.type IN ('sale','purchase')`).get(...params);
+  const discountRow = db.prepare(`SELECT COALESCE(SUM(t.discount),0) discount FROM transactions t WHERE ${cond} AND t.type IN ('sale','purchase')`).get(...params);
 
-  res.json({ from, to, byType, profit, topItems, topCustomers, expenseByNote });
+  const profit = byType.sale + byType.other_income - byType.purchase - byType.expense;
+
+  res.json({ from, to, byType, profit, vat: vatRow.vat, discount: discountRow.discount, topItems, topCustomers, expenseByNote });
+});
+
+/* ---------------- Daybook ---------------- */
+
+app.get('/api/daybook', auth(), (req, res) => {
+  const { date } = req.query;
+  const d = date || new Date().toISOString().slice(0, 10);
+  const rows = db.prepare(`SELECT t.*, p.name party_name, i.name item_name FROM transactions t
+    LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+    WHERE t.business_id=? AND t.date=? ORDER BY t.id`).all(req.business.id, d);
+  const total = db.prepare(`SELECT
+      COALESCE(SUM(CASE WHEN t.type IN ('sale','payment_in','other_income') THEN t.amount ELSE 0 END),0) inflow,
+      COALESCE(SUM(CASE WHEN t.type IN ('purchase','payment_out','expense') THEN t.amount ELSE 0 END),0) outflow
+    FROM transactions t WHERE t.business_id=? AND t.date=?`).get(req.business.id, d);
+  res.json({ date: d, transactions: rows, inflow: total.inflow, outflow: total.outflow });
 });
 
 /* ---------------- Staff ---------------- */
@@ -428,22 +477,142 @@ app.post('/api/import', auth(), (req, res) => {
     db.prepare('DELETE FROM parties WHERE business_id=?').run(b);
     db.prepare('DELETE FROM items WHERE business_id=?').run(b);
     for (const p of data.parties) {
-      const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-        .run(b, p.type, p.name, p.phone || '', p.email || '', p.address || '', p.opening_balance || 0, p.note || '', p.created_at || new Date().toISOString());
+      const r = db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(b, p.type, p.name, p.phone || '', p.email || '', p.address || '', p.opening_balance || 0, p.note || '', p.category || '', p.created_at || new Date().toISOString());
       idMap['p' + p.id] = r.lastInsertRowid;
     }
     const itemMap = {};
     for (const it of data.items) {
-      const r = db.prepare('INSERT INTO items (business_id, name, unit, purchase_price, sale_price, stock, low_stock, created_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(b, it.name, it.unit || 'pcs', it.purchase_price || 0, it.sale_price || 0, it.stock || 0, it.low_stock || 0, it.created_at || new Date().toISOString());
+      const r = db.prepare('INSERT INTO items (business_id, name, unit, category, purchase_price, wholesale_price, sale_price, mrp, stock, low_stock, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run(b, it.name, it.unit || 'pcs', it.category || '', it.purchase_price || 0, it.wholesale_price || 0, it.sale_price || 0, it.mrp || 0, it.stock || 0, it.low_stock || 0, it.created_at || new Date().toISOString());
       itemMap['i' + it.id] = r.lastInsertRowid;
     }
     for (const t of data.transactions) {
-      db.prepare('INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, payment_method, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-        .run(b, t.type, t.date, t.party_id ? (idMap['p' + t.party_id] || null) : null, t.item_id ? (itemMap['i' + t.item_id] || null) : null, t.quantity || 0, t.rate || 0, t.amount, t.payment_method || '', t.note || '', t.created_at || new Date().toISOString());
+      db.prepare('INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note, ref_no, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(b, t.type, t.date, t.party_id ? (idMap['p' + t.party_id] || null) : null, t.item_id ? (itemMap['i' + t.item_id] || null) : null, t.quantity || 0, t.rate || 0, t.amount, t.discount || 0, t.vat_percent || 0, t.reminder_date || '', t.payment_method || '', t.note || '', t.ref_no || '', t.created_at || new Date().toISOString());
     }
     commit();
     res.json({ ok: true, business: getBusiness(b) });
+  } catch (e) {
+    rollback();
+    bad('Import failed: invalid data')(res);
+  }
+});
+
+/* ---------------- Accounts ---------------- */
+
+app.get('/api/accounts', auth(), (req, res) => {
+  const b = req.business.id;
+  const rows = db.prepare(`SELECT payment_method,
+    COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income') THEN amount ELSE 0 END),0) tin,
+    COALESCE(SUM(CASE WHEN type IN ('purchase','expense','payment_out') THEN amount ELSE 0 END),0) tout
+    FROM transactions WHERE business_id=? GROUP BY payment_method`).all(b);
+  const sums = {};
+  rows.forEach(r => { if (r.payment_method) sums[r.payment_method] = r; });
+  const accounts = db.prepare('SELECT * FROM accounts WHERE business_id=? ORDER BY name COLLATE NOCASE').all(b);
+  const seen = {};
+  const out = accounts.map(a => {
+    seen[a.name.toLowerCase()] = true;
+    const s = sums[a.name];
+    const tin = s ? s.tin : 0;
+    const tout = s ? s.tout : 0;
+    return { ...a, in: tin, out: tout, balance: Math.round((tin - tout) * 100) / 100 };
+  });
+  Object.keys(sums).forEach(n => {
+    if (!seen[n.toLowerCase()]) {
+      out.push({ id: null, name: n, type: 'other', in: sums[n].tin, out: sums[n].tout, balance: Math.round((sums[n].tin - sums[n].tout) * 100) / 100 });
+    }
+  });
+  res.json({ accounts: out });
+});
+
+app.post('/api/accounts', auth(), (req, res) => {
+  const { name, type } = req.body;
+  if (!name || !String(name).trim()) return bad('Account name is required')(res);
+  const r = db.prepare('INSERT INTO accounts (business_id, name, type) VALUES (?,?,?)')
+    .run(req.business.id, String(name).trim(), ['cash', 'bank', 'wallet', 'card', 'other'].includes(type) ? type : 'other');
+  res.json({ ok: true, id: r.lastInsertRowid });
+});
+
+app.put('/api/accounts/:id', auth(), (req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!a) return bad('Account not found')(res);
+  const name = req.body.name ? String(req.body.name).trim() : a.name;
+  db.prepare('UPDATE accounts SET name=?, type=? WHERE id=?').run(name, ['cash', 'bank', 'wallet', 'card', 'other'].includes(req.body.type) ? req.body.type : a.type, a.id);
+  if (name !== a.name) db.prepare('UPDATE transactions SET payment_method=? WHERE business_id=? AND payment_method=?').run(name, req.business.id, a.name);
+  res.json({ ok: true });
+});
+
+app.delete('/api/accounts/:id', auth(), (req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!a) return bad('Account not found')(res);
+  db.prepare('DELETE FROM accounts WHERE id=?').run(a.id);
+  res.json({ ok: true });
+});
+
+/* ---------------- CSV import ---------------- */
+
+app.post('/api/import/csv/parties', auth(), (req, res) => {
+  const list = req.body;
+  if (!Array.isArray(list)) return bad('Invalid payload')(res);
+  const b = req.business.id;
+  let count = 0;
+  begin();
+  try {
+    for (const p of list) {
+      const type = String(p.type || 'customer').toLowerCase();
+      if (!['customer', 'supplier'].includes(type)) continue;
+      const name = String(p.name || '').trim();
+      if (!name) continue;
+      db.prepare('INSERT INTO parties (business_id, type, name, phone, email, address, opening_balance, note, category) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(b, type, name, p.phone || '', p.email || '', p.address || '', Number(p.opening_balance) || 0, p.note || '', p.category || '');
+      count++;
+    }
+    commit();
+    res.json({ ok: true, count });
+  } catch (e) {
+    rollback();
+    bad('Import failed: invalid data')(res);
+  }
+});
+
+app.post('/api/import/csv/transactions', auth(), (req, res) => {
+  const list = req.body;
+  if (!Array.isArray(list)) return bad('Invalid payload')(res);
+  const b = req.business.id;
+  const allowed = ['sale', 'purchase', 'expense', 'payment_in', 'payment_out', 'other_income'];
+  let count = 0;
+  begin();
+  try {
+    for (const t of list) {
+      const type = String(t.type || '').toLowerCase();
+      if (!allowed.includes(type)) continue;
+      const amount = Number(t.amount);
+      if (!(amount > 0)) continue;
+      let partyId = null;
+      if (t.party) {
+        const p = db.prepare('SELECT id FROM parties WHERE business_id=? AND name=? COLLATE NOCASE').get(b, String(t.party).trim());
+        if (p) partyId = p.id;
+      }
+      let itemId = null;
+      let quantity = Number(t.quantity) || 0;
+      if (t.item) {
+        const it = db.prepare('SELECT id FROM items WHERE business_id=? AND name=? COLLATE NOCASE').get(b, String(t.item).trim());
+        if (it) itemId = it.id;
+      }
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(String(t.date || '')) ? String(t.date) : new Date().toISOString().slice(0, 10);
+      const r = db.prepare('INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(b, type, date, partyId, itemId, quantity, Number(t.rate) || 0, amount, Number(t.discount) || 0, Number(t.vat_percent) || 0, t.reminder_date || '', t.payment_method || '', t.note || '');
+      if (t.ref_no) db.prepare('UPDATE transactions SET ref_no=? WHERE id=?').run(String(t.ref_no), r.lastInsertRowid);
+      else db.prepare("UPDATE transactions SET ref_no=(SELECT COALESCE(invoice_prefix,'INV') FROM businesses WHERE id=?1) || '-' || printf('%06d',?2) WHERE id=?2").run(b, r.lastInsertRowid);
+      if (itemId) {
+        if (type === 'sale') adjustStock(itemId, -quantity);
+        if (type === 'purchase') adjustStock(itemId, quantity);
+      }
+      count++;
+    }
+    commit();
+    res.json({ ok: true, count });
   } catch (e) {
     rollback();
     bad('Import failed: invalid data')(res);

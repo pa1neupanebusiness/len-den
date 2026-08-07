@@ -10,11 +10,20 @@ const state = {
   txnFilter: { type: '', party_id: '', item_id: '', from: '', to: '', q: '' },
   reportRange: 'week',
   ledgerParty: null,
+  partyTab: 'all',
+  partyCat: '',
+  partyQ: '',
+  itemCat: '',
+  daybookDate: today(),
+  dark: localStorage.getItem('lenden_dark') === '1',
+  fontSize: Number(localStorage.getItem('lenden_font')) || 16,
 };
 
 /* ---------- helpers ---------- */
 const $ = id => document.getElementById(id);
 const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+const TX_VIEWS = ['khata', 'sales', 'purchase', 'expense', 'other_income'];
 
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, {
@@ -166,6 +175,7 @@ async function boot() {
   });
   navBind();
   await loadRefs();
+  applyAppearance();
   route();
 }
 
@@ -183,7 +193,7 @@ function navBind() {
   $('globalSearch').addEventListener('keydown', e => {
     if (e.key === 'Enter') {
       state.txnFilter.q = e.target.value;
-      if (state.view === 'khata') route();
+      if (TX_VIEWS.includes(state.view)) route();
     }
   });
 }
@@ -202,15 +212,24 @@ async function loadRefs() {
 async function route() {
   const v = state.view;
   $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === v));
-  $('globalSearchWrap').classList.toggle('hidden', v !== 'khata');
+  $('globalSearchWrap').classList.toggle('hidden', !TX_VIEWS.includes(v));
   try {
     if (v === 'dashboard') await renderDashboard();
     else if (v === 'khata') await renderKhata();
+    else if (v === 'sales') await renderTypeView({ type: 'sale', title: 'Sales', label: 'Sale', partyType: 'customer', badge: ['Sale', 'success'] });
+    else if (v === 'purchase') await renderTypeView({ type: 'purchase', title: 'Purchases', label: 'Purchase', partyType: 'supplier', badge: ['Purchase', 'info'] });
+    else if (v === 'expense') await renderTypeView({ type: 'expense', title: 'Expenses', label: 'Expense', badge: ['Expense', 'danger'] });
+    else if (v === 'other_income') await renderTypeView({ type: 'other_income', title: 'Other Income', label: 'Income', badge: ['Other income', 'success'] });
+    else if (v === 'accounts') await renderAccounts();
     else if (v === 'parties') await renderParties();
     else if (v === 'ledger') await renderLedger();
     else if (v === 'items') await renderItems();
     else if (v === 'reports') await renderReports();
     else if (v === 'staff') await renderStaff();
+    else if (v === 'import') await renderImport();
+    else if (v === 'refer') await renderRefer();
+    else if (v === 'help') await renderHelp();
+    else if (v === 'tutorials') await renderTutorials();
     else if (v === 'settings') await renderSettings();
   } catch (e) {
     $('view').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
@@ -222,14 +241,14 @@ async function renderDashboard() {
   setTitle('Dashboard');
   const d = await api('/summary');
   const s = d.today;
-  const income = s.sale + s.payment_in;
+  const income = s.sale + s.payment_in + s.other_income;
   const outcome = s.purchase + s.expense + s.payment_out;
   const net = income - outcome;
-  const txnTypes = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
+  const txnTypes = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], other_income: ['Other income', 'success'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
 
   const recentHtml = d.recent.length ? d.recent.map(t => {
     const meta = txnTypes[t.type] || [t.type, 'soft'];
-    const amtCls = ['sale', 'payment_in'].includes(t.type) ? 'pos' : 'neg';
+    const amtCls = ['sale', 'payment_in', 'other_income'].includes(t.type) ? 'pos' : 'neg';
     return `<tr>
       <td><span class="badge badge-${meta[1]}">${meta[0]}</span></td>
       <td>${esc(t.party_name || t.item_name || t.note || '—')}</td>
@@ -253,6 +272,17 @@ async function renderDashboard() {
   const curMonth = mKeys[mKeys.length - 1];
   const curProfit = curMonth ? agg[curMonth].sale - agg[curMonth].out : 0;
   const salesCount = d.todayCounts ? d.todayCounts.sale : 0;
+
+  const day = await api('/daybook?date=' + (state.daybookDate || today()));
+  const dayRows = day.transactions.length ? day.transactions.map(t => {
+    const meta = txnTypes[t.type] || [t.type, 'soft'];
+    return `<tr>
+      <td><span class="badge badge-${meta[1]}">${meta[0]}</span></td>
+      <td>${esc(t.party_name || t.item_name || t.note || '—')}</td>
+      <td class="amount ${['sale', 'payment_in', 'other_income'].includes(t.type) ? 'pos' : 'neg'}">${rs(t.amount)}</td>
+      <td style="color:var(--text-tertiary);font-size:12px">${esc(t.ref_no || '')}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="4"><div class="empty">Nothing recorded on this day</div></td></tr>';
 
   $('view').innerHTML = `
     <div class="stats">
@@ -279,6 +309,22 @@ async function renderDashboard() {
     <div class="card card-pad mt-16">
       <div class="row spread mb-16"><h3>Recent transactions</h3><button class="btn btn-sm" onclick="go('khata')">View all</button></div>
       <div class="table-wrap"><table><thead><tr><th>Type</th><th>Party / Item</th><th>Amount</th><th>Date</th></tr></thead><tbody>${recentHtml}</tbody></table></div>
+    </div>
+    <div class="grid-2 mt-16">
+      <div class="card card-pad">
+        <div class="row spread mb-16"><h3>Daybook</h3><input type="date" class="input" style="width:160px" value="${state.daybookDate || today()}" onchange="setDaybookDate(this.value)"/></div>
+        <div class="stats mt-8">
+          <div class="stat recv" style="border:none;box-shadow:none"><div class="s-label">Money in</div><div class="s-value pos" style="font-size:18px">${rs(day.inflow)}</div></div>
+          <div class="stat pay" style="border:none;box-shadow:none"><div class="s-label">Money out</div><div class="s-value neg" style="font-size:18px">${rs(day.outflow)}</div></div>
+        </div>
+        <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Type</th><th>Details</th><th>Amount</th><th>Ref</th></tr></thead><tbody>${dayRows}</tbody></table></div>
+      </div>
+      <div class="card card-pad">
+        <h3 class="mb-16">Quick tools</h3>
+        <button class="btn btn-block mb-16" onclick="emiModal()">📱 EMI calculator</button>
+        <button class="btn btn-block mb-16" onclick="go('reports')">📈 View reports</button>
+        <button class="btn btn-block" onclick="go('tutorials')">📘 Tutorials</button>
+      </div>
     </div>`;
 
   if (mSalesA.length) {
@@ -295,20 +341,22 @@ function go(v) {
   route();
 }
 
+function setDaybookDate(d) { state.daybookDate = d || today(); route(); }
+
 /* ---------- Khata / Transactions ---------- */
 async function renderKhata() {
   setTitle('Transactions');
   const f = state.txnFilter;
   const q = new URLSearchParams({ type: f.type, party_id: f.party_id, item_id: f.item_id, from: f.from, to: f.to, q: f.q, page: state.txnPage, limit: 25 }).toString();
   const d = await api('/transactions?' + q);
-  const txnTypes = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
+  const txnTypes = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], other_income: ['Other income', 'success'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
 
-  const tabs = [['', 'All'], ['sale', 'Sales'], ['purchase', 'Purchases'], ['expense', 'Expenses'], ['payment_in', 'Received'], ['payment_out', 'Paid out']]
+  const tabs = [['', 'All'], ['sale', 'Sales'], ['purchase', 'Purchases'], ['expense', 'Expenses'], ['other_income', 'Other Income'], ['payment_in', 'Received'], ['payment_out', 'Paid out']]
     .map(([v, l]) => `<button class="${f.type === v ? 'active' : ''}" onclick="setTxnType('${v}')">${l}</button>`).join('');
 
   const rows = d.transactions.map(t => {
     const meta = txnTypes[t.type] || [t.type, 'soft'];
-    const amtCls = ['sale', 'payment_in'].includes(t.type) ? 'pos' : 'neg';
+    const amtCls = ['sale', 'payment_in', 'other_income'].includes(t.type) ? 'pos' : 'neg';
     return `<tr>
       <td><span class="badge badge-${meta[1]}">${meta[0]}</span></td>
       <td>${prettyDate(t.date)}</td>
@@ -364,48 +412,68 @@ function resetTxnFilter() { state.txnFilter = { type: '', party_id: '', item_id:
 function pageTxn(p) { state.txnPage = p; route(); }
 
 function txnModal(txn) {
-  const editing = !!txn;
+  const editing = !!txn && !!txn.id;
   const defType = txn ? txn.type : 'sale';
   const customers = state.parties.filter(p => p.type === 'customer');
   const suppliers = state.parties.filter(p => p.type === 'supplier');
   const partyOpts = (list, sel) => `<option value="">— Select —</option>` + list.map(p => `<option value="${p.id}" ${Number(sel) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
   const itemOpts = `<option value="">— None —</option>` + state.items.map(i => `<option value="${i.id}" ${Number(txn && txn.item_id) === i.id ? 'selected' : ''}>${esc(i.name)} (${fmt(i.stock)} ${i.unit} in stock)</option>`).join('');
-  const types = [['sale', 'Sale (khata baki)'], ['purchase', 'Purchase'], ['expense', 'Expense'], ['payment_in', 'Payment received'], ['payment_out', 'Payment made']];
+  const types = [['sale', 'Sale (khata baki)'], ['purchase', 'Purchase'], ['expense', 'Expense'], ['other_income', 'Other Income'], ['payment_in', 'Payment received'], ['payment_out', 'Payment made']];
+  const noItemTypes = ['expense', 'other_income', 'payment_in', 'payment_out'];
 
+  let partyFieldHtml;
+  if (defType === 'expense') {
+    partyFieldHtml = `<div class="field"><label>Expense category</label><input class="input" id="f_party" list="expCat" placeholder="e.g. Rent, Salary..." value="${esc(txn && txn.note || '')}"/><datalist id="expCat">${['Rent', 'Salary', 'Electricity', 'Transport', 'Utilities', 'Tea & snacks', 'Maintenance'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
+  } else if (defType === 'other_income') {
+    partyFieldHtml = `<div class="field"><label>Income category</label><input class="input" id="f_party" list="incCat" placeholder="e.g. Interest, Commission..." value="${esc(txn && txn.note || '')}"/><datalist id="incCat">${['Interest', 'Commission', 'Rent received', 'Discount received', 'Sale of assets', 'Other'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
+  } else if (defType === 'purchase' || defType === 'payment_out') {
+    partyFieldHtml = `<div class="field"><label>Supplier</label><select class="select" id="f_party">${partyOpts(suppliers, txn && txn.party_id)}</select></div>`;
+  } else {
+    partyFieldHtml = `<div class="field"><label>Customer</label><select class="select" id="f_party">${partyOpts(customers, txn && txn.party_id)}</select></div>`;
+  }
+
+  const rateHint = (txn && txn.rate) ? ` · rate ${rs(txn.rate)}` : '';
   const wrap = openModal(editing ? 'Edit transaction' : 'Add transaction', `
+    ${txn && txn.ref_no ? `<div class="field"><label>Reference no.</label><input class="input" value="${esc(txn.ref_no)}" disabled/></div>` : ''}
     <div class="field"><label>Transaction type</label>
       <select class="select" id="f_type">${types.map(([v, l]) => `<option value="${v}" ${defType === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     </div>
-    <div id="partyField"><div class="field"><label id="partyLabel">Customer</label>
-      <select class="select" id="f_party">${partyOpts(customers, txn && txn.party_id)}</select>
-    </div></div>
-    <div id="itemField" class="${defType === 'expense' ? 'hidden' : ''}">
+    <div id="partyField">${partyFieldHtml}</div>
+    <div id="itemField" class="${noItemTypes.includes(defType) ? 'hidden' : ''}">
       <div class="field"><label>Item</label><select class="select" id="f_item">${itemOpts}</select></div>
       <div class="row">
         <div class="field" style="flex:1"><label>Quantity</label><input class="input" id="f_qty" type="number" min="0" step="any" value="${txn && txn.quantity ? txn.quantity : 1}" oninput="calcAmt()"/></div>
-        <div class="field" style="flex:1"><label>Rate</label><input class="input" id="f_rate" type="number" min="0" step="any" value="${txn && txn.rate ? txn.rate : ''}" oninput="calcAmt()"/></div>
+        <div class="field" style="flex:1"><label>Rate${txn && txn.rate ? rateHint : ''}</label><input class="input" id="f_rate" type="number" min="0" step="any" value="${txn && txn.rate ? txn.rate : ''}" oninput="calcAmt()"/></div>
       </div>
+      <div class="hint" id="priceHint" style="color:var(--text-tertiary);font-size:12px;margin-bottom:10px"></div>
     </div>
     <div class="field"><label>Amount (Rs.)</label><input class="input" id="f_amount" type="number" min="0" step="any" value="${txn ? txn.amount : ''}" oninput="manualAmt()"/></div>
+    <div id="discVatRow" class="row ${noItemTypes.includes(defType) ? 'hidden' : ''}">
+      <div class="field" style="flex:1"><label>Discount (Rs.)</label><input class="input" id="f_discount" type="number" min="0" step="any" value="${txn && txn.discount ? txn.discount : 0}"/></div>
+      <div class="field" style="flex:1"><label>VAT (%)</label><input class="input" id="f_vat" type="number" min="0" step="any" value="${txn && txn.vat_percent ? txn.vat_percent : 0}"/></div>
+    </div>
     <div class="row">
       <div class="field" style="flex:1"><label>Date</label><input class="input" id="f_date" type="date" value="${txn ? txn.date : today()}"/></div>
       <div class="field" style="flex:1"><label>Payment method</label>
         <select class="select" id="f_method"><option value="">Cash</option><option ${txn && txn.payment_method === 'Bank' ? 'selected' : ''}>Bank</option><option ${txn && txn.payment_method === 'Khalti' ? 'selected' : ''}>Khalti</option><option ${txn && txn.payment_method === 'eSewa' ? 'selected' : ''}>eSewa</option><option ${txn && txn.payment_method === 'Mobile Banking' ? 'selected' : ''}>Mobile Banking</option><option ${txn && txn.payment_method === 'Cheque' ? 'selected' : ''}>Cheque</option></select>
       </div>
     </div>
+    <div class="field"><label>Reminder / due date</label><input class="input" id="f_reminder" type="date" value="${txn && txn.reminder_date ? txn.reminder_date : ''}"/><div class="hint" style="color:var(--text-tertiary);font-size:12px">Set a due date for this khata entry — you can send a WhatsApp reminder from the ledger.</div></div>
     <div class="field"><label>Note</label><input class="input" id="f_note" placeholder="Optional note" value="${esc(txn && txn.note || '')}"/></div>
-  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button>
+  `, `${editing ? `<button class="btn" onclick="viewInvoice(${txn.id})">🧾 Invoice</button>` : ''}<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button>
       <button class="btn btn-primary" id="saveTxn">Save</button>`);
 
   const typeSel = wrap.querySelector('#f_type');
-  const noItemTypes = ['expense', 'payment_in', 'payment_out'];
   typeSel.addEventListener('change', () => {
     const t = typeSel.value;
     const partyField = wrap.querySelector('#partyField');
     const itemField = wrap.querySelector('#itemField');
     itemField.classList.toggle('hidden', noItemTypes.includes(t));
+    wrap.querySelector('#discVatRow').classList.toggle('hidden', noItemTypes.includes(t));
     if (t === 'expense') {
       partyField.innerHTML = `<div class="field"><label>Expense category</label><input class="input" id="f_party" list="expCat" placeholder="e.g. Rent, Salary..." value="${esc(txn && txn.note || '')}"/><datalist id="expCat">${['Rent', 'Salary', 'Electricity', 'Transport', 'Utilities', 'Tea & snacks', 'Maintenance'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
+    } else if (t === 'other_income') {
+      partyField.innerHTML = `<div class="field"><label>Income category</label><input class="input" id="f_party" list="incCat" placeholder="e.g. Interest, Commission..." value="${esc(txn && txn.note || '')}"/><datalist id="incCat">${['Interest', 'Commission', 'Rent received', 'Discount received', 'Sale of assets', 'Other'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
     } else if (t === 'purchase' || t === 'payment_out') {
       partyField.innerHTML = `<div class="field"><label>Supplier</label><select class="select" id="f_party">${partyOpts(suppliers, txn && txn.party_id)}</select></div>`;
     } else {
@@ -418,19 +486,22 @@ function txnModal(txn) {
       type: wrap.querySelector('#f_type').value,
       date: wrap.querySelector('#f_date').value || today(),
       amount: Number(wrap.querySelector('#f_amount').value) || 0,
+      discount: Number(wrap.querySelector('#f_discount').value) || 0,
+      vat_percent: Number(wrap.querySelector('#f_vat').value) || 0,
+      reminder_date: (wrap.querySelector('#f_reminder') || {}).value || '',
       payment_method: wrap.querySelector('#f_method').value || '',
       note: wrap.querySelector('#f_note').value.trim(),
     };
     const partyEl = wrap.querySelector('#f_party');
     body.party_id = partyEl && partyEl.value ? (isNaN(partyEl.value) ? null : Number(partyEl.value)) : null;
-    if (body.type === 'expense' && partyEl && partyEl.value && isNaN(partyEl.value) && !body.note) {
+    if (['expense', 'other_income'].includes(body.type) && partyEl && partyEl.value && isNaN(partyEl.value) && !body.note) {
       body.note = partyEl.value.trim();
     }
     const itemEl = wrap.querySelector('#f_item');
     body.item_id = itemEl ? Number(itemEl.value) || null : null;
     body.quantity = Number((wrap.querySelector('#f_qty') || {}).value) || 0;
     body.rate = Number((wrap.querySelector('#f_rate') || {}).value) || 0;
-    if (body.type !== 'expense' && body.party_id == null && body.item_id == null) return toast('Select a party or an item', 'error');
+    if (!['expense', 'other_income'].includes(body.type) && body.party_id == null && body.item_id == null) return toast('Select a party or an item', 'error');
     if (body.amount <= 0) return toast('Amount must be greater than zero', 'error');
     try {
       if (editing) await api('/transactions/' + txn.id, { method: 'PUT', body });
@@ -441,6 +512,24 @@ function txnModal(txn) {
       route();
     } catch (e) { toast(e.message, 'error'); }
   });
+
+  const itemSel = wrap.querySelector('#f_item');
+  if (itemSel) {
+    itemSel.addEventListener('change', () => {
+      const it = state.items.find(x => x.id === Number(itemSel.value));
+      const hint = wrap.querySelector('#priceHint');
+      const typeNow = wrap.querySelector('#f_type').value;
+      if (it && hint) {
+        hint.textContent = `Buy ${rs(it.purchase_price)} · Sell ${rs(it.sale_price)} · Wholesale ${rs(it.wholesale_price)} · MRP ${rs(it.mrp)} · ${fmt(it.stock)} ${it.unit} in stock`;
+        const rateEl = wrap.querySelector('#f_rate');
+        if (rateEl && !Number(rateEl.value)) {
+          const suggested = typeNow === 'purchase' ? (it.wholesale_price || it.purchase_price) : (it.wholesale_price || it.sale_price);
+          rateEl.value = suggested || '';
+          calcAmt();
+        }
+      } else if (hint) hint.textContent = '';
+    });
+  }
 }
 window.calcAmt = () => {
   const q = document.getElementById('f_qty'), r = document.getElementById('f_rate'), a = document.getElementById('f_amount');
@@ -449,6 +538,7 @@ window.calcAmt = () => {
 window.manualAmt = () => { /* allow manual override */ };
 
 function addTxn() { txnModal(null); }
+function addTxnOfType(type) { txnModal({ type: type }); }
 async function editTxn(id) {
   const d = await api('/transactions?page=1&limit=1000');
   const t = d.transactions.find(x => x.id === id);
@@ -463,12 +553,120 @@ async function delTxn(id) {
   });
 }
 
+async function viewInvoice(id) {
+  const d = await api('/transactions/' + id);
+  const t = d.transaction;
+  const b = d.business;
+  const lines = [];
+  if (t.item_name) lines.push([t.item_name, fmt(t.quantity) + ' ' + t.item_unit, rs(t.rate), rs(t.amount)]);
+  else if (t.party_name) lines.push([(t.note || 'Khata entry'), '', '', rs(t.amount)]);
+  else lines.push([t.note || 'Entry', '', '', rs(t.amount)]);
+  const subtotal = Number(t.amount) + Number(t.discount);
+  const wrap = openModal('Invoice ' + esc(t.ref_no || ''), `
+    <div id="invoicePrint" style="max-width:380px;margin:0 auto;padding:10px;font-size:14px;color:#000">
+      <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:10px">
+        <div style="font-size:20px;font-weight:800">${esc(b.name)}</div>
+        <div style="font-size:12px">${esc(b.address || '')}</div>
+        <div style="font-size:12px">Tel: ${esc(b.phone || '—')}${b.owner_name ? ' · ' + esc(b.owner_name) : ''}</div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:8px">
+        <div>Invoice: <b>${esc(t.ref_no || '—')}</b></div>
+        <div>Date: <b>${prettyDate(t.date)}</b></div>
+      </div>
+      <div style="font-size:12px;margin-top:4px">${t.party_name ? 'Bill to: <b>' + esc(t.party_name) + '</b>' + (t.party_phone ? ' · +977 ' + esc(t.party_phone) : '') : ''}</div>
+      <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:12px">
+        <thead><tr style="border-bottom:1px solid #000"><th style="text-align:left">Description</th><th style="text-align:right">Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>${lines.map(l => `<tr><td>${l[0]}</td><td style="text-align:right">${l[1]}</td><td style="text-align:right">${l[2]}</td><td style="text-align:right">${l[3]}</td></tr>`).join('')}</tbody>
+      </table>
+      <div style="margin-top:8px;font-size:12px">
+        <div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${rs(subtotal)}</span></div>
+        ${t.discount ? `<div style="display:flex;justify-content:space-between"><span>Discount</span><span>- ${rs(t.discount)}</span></div>` : ''}
+        ${t.vat_percent ? `<div style="display:flex;justify-content:space-between"><span>VAT ${fmt(t.vat_percent)}%</span><span>${rs(t.amount * t.vat_percent / 100)}</span></div>` : ''}
+        <div style="display:flex;justify-content:space-between;font-weight:800;font-size:14px;border-top:1px solid #000;margin-top:4px;padding-top:4px"><span>Total</span><span>${rs(t.amount)}</span></div>
+        ${t.payment_method ? `<div style="display:flex;justify-content:space-between"><span>Payment</span><span>${esc(t.payment_method)}</span></div>` : ''}
+        ${t.reminder_date ? `<div style="display:flex;justify-content:space-between"><span>Due date</span><span>${prettyDate(t.reminder_date)}</span></div>` : ''}
+      </div>
+      ${t.note ? `<div style="font-size:11px;margin-top:8px">Note: ${esc(t.note)}</div>` : ''}
+      <div style="text-align:center;font-size:11px;margin-top:12px;border-top:1px dashed #000;padding-top:6px">Thank you!</div>
+    </div>`,
+    `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Close</button><button class="btn btn-primary" onclick="printInvoice()">🖨 Print / Save PDF</button>`);
+  window.__printSource = wrap.querySelector('#invoicePrint').cloneNode(true);
+}
+window.printInvoice = () => {
+  const src = window.__printSource;
+  if (!src) return;
+  const w = window.open('', '_blank', 'width=480,height=700');
+  w.document.write('<!doctype html><html><head><title>Invoice</title><style>body{font-family:Arial,sans-serif;margin:24px}#invoicePrint{max-width:380px;margin:0 auto}</style></head><body>');
+  w.document.write(src.outerHTML);
+  w.document.write('<script>window.onload=function(){window.print();setTimeout(function(){window.close();},800);}<\/script></body></html>');
+  w.document.close();
+};
+
+/* ---------- Sales / Purchase / Expense / Other Income ---------- */
+async function renderTypeView(cfg) {
+  setTitle(cfg.title);
+  const f = state.txnFilter;
+  const q = new URLSearchParams({ type: cfg.type, party_id: f.party_id, item_id: f.item_id, from: f.from, to: f.to, q: f.q, page: state.txnPage, limit: 25 }).toString();
+  const d = await api('/transactions?' + q);
+  const meta = cfg.badge || [cfg.label || cfg.type, 'soft'];
+  const isIn = cfg.type === 'sale' || cfg.type === 'other_income';
+
+  const overdue = t => t.reminder_date && t.reminder_date < today() && ['sale', 'purchase'].includes(t.type) && t.type !== 'payment_in' && t.type !== 'payment_out';
+  const rows = d.transactions.map(t => `
+    <tr>
+      <td>${prettyDate(t.date)}</td>
+      <td><b>${esc(t.party_name || t.item_name || (t.note || '—'))}</b><div class="hint" style="color:var(--text-tertiary);font-size:11px">${esc(t.ref_no || '')}${t.item_name ? ' · ' + esc(t.item_name) : ''}</div>${t.reminder_date ? ` <span class="badge ${t.reminder_date < today() ? 'badge-danger' : 'badge-warning'}" title="Due ${prettyDate(t.reminder_date)}">⏰ ${prettyDate(t.reminder_date)}</span>` : ''}</td>
+      <td class="amount ${isIn ? 'pos' : 'neg'}">${rs(t.amount)}</td>
+      <td>${t.discount ? rs(t.discount) : '—'}${t.vat_percent ? `<div class="hint" style="color:var(--text-tertiary);font-size:11px">VAT ${fmt(t.vat_percent)}%</div>` : ''}</td>
+      <td>${t.payment_method ? esc(t.payment_method) : '—'}</td>
+      <td>
+        <button class="btn btn-sm btn-ghost" onclick="viewInvoice(${t.id})">🧾</button>
+        <button class="btn btn-sm" onclick="editTxn(${t.id})">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="delTxn(${t.id})">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  const partyOpts = cfg.partyType
+    ? `<option value="">All ${cfg.partyType === 'customer' ? 'customers' : 'suppliers'}</option>` + state.parties.filter(p => p.type === cfg.partyType).map(p => `<option value="${p.id}" ${String(f.party_id) === String(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
+    : '';
+
+  $('view').innerHTML = `
+    <div class="row spread">
+      <div><div class="page-title">${cfg.title}</div><div class="page-sub">${d.total} record${d.total === 1 ? '' : 's'} found${f.from ? ' · from ' + prettyDate(f.from) : ''}</div></div>
+      <button class="btn btn-primary" onclick="addTxnOfType('${cfg.type}')">+ Add ${cfg.label || cfg.title}</button>
+    </div>
+    <div class="card card-pad mt-8">
+      <div class="toolbar">
+        <span class="badge badge-${meta[1]}">${meta[0]}</span>
+        ${partyOpts ? `<select class="select" style="width:180px" onchange="setTxnParty(this.value)">${partyOpts}</select>` : ''}
+        <input type="date" class="input" style="width:150px" value="${f.from}" onchange="setTxnFrom(this.value)"/>
+        <span style="color:var(--text-tertiary)">to</span>
+        <input type="date" class="input" style="width:150px" value="${f.to}" onchange="setTxnTo(this.value)"/>
+        <div class="spacer"></div>
+        <button class="btn btn-sm" onclick="resetTxnFilter()">Reset</button>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Date</th><th>${cfg.partyType === 'supplier' ? 'Supplier' : cfg.partyType === 'customer' ? 'Customer' : 'Details'}</th><th>Amount</th><th>Disc / VAT</th><th>Method</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6"><div class="empty">No ${cfg.title.toLowerCase()} recorded yet</div></td></tr>`}</tbody></table>
+      </div>
+      ${d.pages > 1 ? `<div class="row" style="justify-content:center;padding:14px">
+        <button class="btn btn-sm" ${d.page <= 1 ? 'disabled' : ''} onclick="pageTxn(${d.page - 1})">← Prev</button>
+        <span style="color:var(--text-tertiary);font-size:13px">Page ${d.page} of ${d.pages}</span>
+        <button class="btn btn-sm" ${d.page >= d.pages ? 'disabled' : ''} onclick="pageTxn(${d.page + 1})">Next →</button>
+      </div>` : ''}
+    </div>`;
+}
+
 /* ---------- Parties ---------- */
 async function renderParties() {
   setTitle('Parties');
   const tab = state.partyTab || 'all';
-  const d = await api('/parties');
+  const params = new URLSearchParams();
+  if (state.partyCat) params.set('category', state.partyCat);
+  if (state.partyQ) params.set('q', state.partyQ);
+  const d = await api('/parties' + (params.toString() ? '?' + params : ''));
   const list = d.parties.filter(p => tab === 'all' || p.type === tab);
+  const cats = Array.from(new Set(d.parties.map(p => p.category).filter(Boolean)));
   const tabsHtml = [['all', 'All'], ['customer', 'Customers'], ['supplier', 'Suppliers']]
     .map(([v, l]) => `<button class="${tab === v ? 'active' : ''}" onclick="setPartyTab('${v}')">${l}</button>`).join('');
 
@@ -476,7 +674,10 @@ async function renderParties() {
     <div class="card card-pad" style="display:flex;flex-direction:column;gap:10px;justify-content:space-between">
       <div>
         <div class="row spread">
-          <span class="badge ${p.type === 'customer' ? 'badge-info' : 'badge-warning'}">${p.type === 'customer' ? 'Customer' : 'Supplier'}</span>
+          <div>
+            <span class="badge ${p.type === 'customer' ? 'badge-info' : 'badge-warning'}">${p.type === 'customer' ? 'Customer' : 'Supplier'}</span>
+            ${p.category ? ` <span class="badge badge-soft">${esc(p.category)}</span>` : ''}
+          </div>
           <span style="color:var(--text-tertiary);font-size:12px">${esc(p.phone ? '+977 ' + p.phone : '')}</span>
         </div>
         <div style="font-weight:700;font-size:16px;margin-top:8px">${esc(p.name)}</div>
@@ -500,13 +701,17 @@ async function renderParties() {
     </div>
     <div class="toolbar mt-8">
       <div class="seg">${tabsHtml}</div>
+      <input class="input" style="width:200px" placeholder="Search name, address..." value="${esc(state.partyQ || '')}" oninput="setPartyQ(this.value)"/>
+      ${cats.length ? `<select class="select" style="width:160px" onchange="setPartyCat(this.value)"><option value="">All categories</option>${cats.map(c => `<option value="${esc(c)}" ${state.partyCat === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>` : ''}
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px" class="mt-8">
       ${cards || '<div class="card empty" style="grid-column:1/-1">No parties yet</div>'}
     </div>`;
 }
 
 function setPartyTab(t) { state.partyTab = t; route(); }
+function setPartyQ(v) { state.partyQ = v; clearTimeout(state.__pqT); state.__pqT = setTimeout(route, 350); }
+function setPartyCat(c) { state.partyCat = c; route(); }
 
 function partyModal(p) {
   const editing = !!p;
@@ -516,10 +721,13 @@ function partyModal(p) {
     </div>
     <div class="field"><label>Name *</label><input class="input" id="p_name" value="${esc(p && p.name || '')}" placeholder="e.g. Ram Shrestha, Hari Traders"/></div>
     <div class="row">
+      <div class="field" style="flex:1"><label>Category</label><input class="input" id="p_cat" list="partyCats" placeholder="e.g. Wholesale" value="${esc(p && p.category || '')}"/><datalist id="partyCats">${Array.from(new Set(state.parties.map(x => x.category).filter(Boolean))).map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
       <div class="field" style="flex:1"><label>Phone</label><input class="input" id="p_phone" maxlength="10" value="${esc(p && p.phone || '')}"/></div>
-      <div class="field" style="flex:1"><label>Opening balance (Rs.)</label><input class="input" id="p_ob" type="number" step="any" value="${p && p.opening_balance ? p.opening_balance : 0}"/></div>
     </div>
-    <div class="field"><label>Address</label><input class="input" id="p_addr" value="${esc(p && p.address || '')}"/></div>
+    <div class="row">
+      <div class="field" style="flex:1"><label>Opening balance (Rs.)</label><input class="input" id="p_ob" type="number" step="any" value="${p && p.opening_balance ? p.opening_balance : 0}"/></div>
+      <div class="field" style="flex:1"><label>Address</label><input class="input" id="p_addr" value="${esc(p && p.address || '')}"/></div>
+    </div>
     <div class="field"><label>Email</label><input class="input" id="p_email" value="${esc(p && p.email || '')}"/></div>
     <div class="field"><label>Note</label><input class="input" id="p_note" value="${esc(p && p.note || '')}"/></div>
   `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveParty">Save</button>`);
@@ -528,6 +736,7 @@ function partyModal(p) {
     const body = {
       type: wrap.querySelector('#p_type').value,
       name: wrap.querySelector('#p_name').value.trim(),
+      category: wrap.querySelector('#p_cat').value.trim(),
       phone: wrap.querySelector('#p_phone').value.replace(/\D/g, ''),
       opening_balance: Number(wrap.querySelector('#p_ob').value) || 0,
       address: wrap.querySelector('#p_addr').value.trim(),
@@ -571,7 +780,7 @@ async function renderLedger() {
   const d = await api('/parties/' + id + '/ledger');
   const p = d.party;
   setTitle('Ledger — ' + p.name);
-  const meta = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
+  const meta = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], other_income: ['Other income', 'success'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
   const rows = d.lines.map((l, i) => {
     const m = meta[l.type] || [l.type, 'soft'];
     return `<tr>
@@ -590,13 +799,17 @@ async function renderLedger() {
       <div class="row">
         <button class="btn btn-sm" onclick="go('parties')">← Parties</button>
         <div class="avatar-lg">${esc(p.name[0] || '?')}</div>
-        <div>
-          <div class="page-title">${esc(p.name)}</div>
-          <div class="page-sub">${p.type === 'customer' ? 'Customer' : 'Supplier'} · +977 ${esc(p.phone || '—')}${p.address ? ' · ' + esc(p.address) : ''}</div>
-        </div>
+      <div>
+        <div class="page-title">${esc(p.name)}</div>
+        <div class="page-sub">${p.type === 'customer' ? 'Customer' : 'Supplier'} · +977 ${esc(p.phone || '—')}${p.address ? ' · ' + esc(p.address) : ''}${p.category ? ' · ' + esc(p.category) : ''}</div>
       </div>
-      <button class="btn btn-primary" onclick="addTxnForParty(${p.id}, '${p.type}')">+ Record transaction</button>
     </div>
+    <div class="row">
+      <button class="btn btn-primary" onclick="addTxnForParty(${p.id}, '${p.type}')">+ Record transaction</button>
+      ${p.phone ? `<button class="btn" onclick="waRemind(${p.id})">🟢 WhatsApp reminder</button>` : ''}
+      <button class="btn btn-ghost" onclick="adjustBalance(${p.id})">⚖ Adjust balance</button>
+    </div>
+  </div>
     <div class="card card-pad" style="background:linear-gradient(135deg,#6359e0,#8b7cf6);color:#fff;border:none">
       <div class="row spread">
         <div>
@@ -622,16 +835,45 @@ function addTxnForParty(pid, ptype) {
   txnModal(fake);
 }
 
+async function waRemind(id) {
+  const d = await api('/parties/' + id + '/ledger');
+  const p = d.party;
+  if (!p.phone) return toast('No phone number on file', 'error');
+  const due = d.lines.find(l => l.reminder_date) || {};
+  const text = `Namaste ${p.name}, this is ${state.business.name}. Just a reminder about your pending balance of Rs. ${fmt(d.closing)}. Please settle at your earliest convenience. Thank you!${due.reminder_date ? ' (Due: ' + prettyDate(due.reminder_date) + ')' : ''}`;
+  window.open('https://wa.me/977' + p.phone + '?text=' + encodeURIComponent(text), '_blank');
+  toast('Opening WhatsApp...');
+}
+
+function adjustBalance(id) {
+  const wrap = openModal('Adjust balance', `
+    <p style="color:var(--text-secondary);margin-bottom:12px">Add or reduce the party's balance without creating a transaction. Use a negative value to reduce.</p>
+    <div class="field"><label>Adjustment amount (Rs.)</label><input class="input" id="adj_amt" type="number" step="any" placeholder="e.g. 500 or -500"/></div>
+  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveAdj">Apply</button>`);
+  wrap.querySelector('#saveAdj').addEventListener('click', async () => {
+    const delta = Number(wrap.querySelector('#adj_amt').value) || 0;
+    if (!delta) return toast('Enter an amount', 'error');
+    try {
+      await api('/parties/' + id + '/balance', { method: 'PUT', body: { delta } });
+      toast('Balance adjusted');
+      closeModal(wrap); await loadRefs(); route();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
 /* ---------- Items ---------- */
 async function renderItems() {
   setTitle('Inventory');
-  const d = await api('/items');
+  const d = await api('/items' + (state.itemCat ? '?category=' + encodeURIComponent(state.itemCat) : ''));
+  const cats = Array.from(new Set(d.items.map(i => i.category).filter(Boolean)));
   const rows = d.items.map(i => `
     <tr>
-      <td style="font-weight:600">${esc(i.name)}</td>
+      <td style="font-weight:600">${esc(i.name)}${i.category ? `<div class="hint" style="color:var(--text-tertiary);font-size:11px">${esc(i.category)}</div>` : ''}</td>
       <td>${esc(i.unit)}</td>
       <td class="amount">${rs(i.purchase_price)}</td>
+      <td class="amount">${i.wholesale_price ? rs(i.wholesale_price) : '—'}</td>
       <td class="amount">${rs(i.sale_price)}</td>
+      <td class="amount">${i.mrp ? rs(i.mrp) : '—'}</td>
       <td>
         <span class="amount">${fmt(i.stock)}</span>
         ${i.low_stock > 0 && i.stock <= i.low_stock ? ` <span class="badge badge-danger">Low</span>` : ''}
@@ -642,43 +884,60 @@ async function renderItems() {
       </td>
     </tr>`).join('');
 
+  const catOpts = cats.map(c => `<option value="${esc(c)}" ${state.itemCat === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
   $('view').innerHTML = `
     <div class="row spread">
       <div><div class="page-title">Inventory</div><div class="page-sub">${d.items.length} items · stock updates automatically from transactions</div></div>
       <button class="btn btn-primary" onclick="addItem()">+ Add item</button>
     </div>
+    <div class="toolbar mt-8">
+      ${cats.length ? `<select class="select" style="width:180px" onchange="setItemCat(this.value)"><option value="">All categories</option>${catOpts}</select>` : ''}
+      <span class="hint" style="color:var(--text-tertiary);font-size:12px">Wholesale &amp; MRP prices can be used as rate suggestions when recording sales and purchases.</span>
+    </div>
     <div class="card card-pad mt-8">
       <div class="table-wrap"><table>
-        <thead><tr><th>Item</th><th>Unit</th><th>Buy price</th><th>Sell price</th><th>Stock</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6"><div class="empty">No items yet. Add your products to track inventory.</div></td></tr>'}</tbody>
+        <thead><tr><th>Item</th><th>Unit</th><th>Buy</th><th>Wholesale</th><th>Sell</th><th>MRP</th><th>Stock</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="8"><div class="empty">No items yet. Add your products to track inventory.</div></td></tr>'}</tbody>
       </table></div>
     </div>`;
 }
+function setItemCat(c) { state.itemCat = c; route(); }
 
 function itemModal(it) {
   const editing = !!it;
   const wrap = openModal(editing ? 'Edit item' : 'Add item', `
     <div class="field"><label>Item name *</label><input class="input" id="i_name" value="${esc(it && it.name || '')}" placeholder="e.g. Coca-Cola 1L"/></div>
     <div class="row">
+      <div class="field" style="flex:1"><label>Category</label><input class="input" id="i_cat" list="itemCats" placeholder="e.g. Cold drinks" value="${esc(it && it.category || '')}"/><datalist id="itemCats">${Array.from(new Set(state.items.map(i => i.category).filter(Boolean))).map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
       <div class="field" style="flex:1"><label>Unit</label>
         <select class="select" id="i_unit"><option ${it && it.unit === 'pcs' ? 'selected' : ''}>pcs</option><option ${it && it.unit === 'kg' ? 'selected' : ''}>kg</option><option ${it && it.unit === 'liter' ? 'selected' : ''}>liter</option><option ${it && it.unit === 'box' ? 'selected' : ''}>box</option><option ${it && it.unit === 'dozen' ? 'selected' : ''}>dozen</option><option ${it && it.unit === 'pack' ? 'selected' : ''}>pack</option></select>
       </div>
-      <div class="field" style="flex:1"><label>Stock on hand</label><input class="input" id="i_stock" type="number" step="any" value="${it ? it.stock : 0}"/></div>
     </div>
     <div class="row">
       <div class="field" style="flex:1"><label>Buy price (Rs.)</label><input class="input" id="i_bp" type="number" step="any" value="${it ? it.purchase_price : 0}"/></div>
-      <div class="field" style="flex:1"><label>Sell price (Rs.)</label><input class="input" id="i_sp" type="number" step="any" value="${it ? it.sale_price : 0}"/></div>
+      <div class="field" style="flex:1"><label>Wholesale price (Rs.)</label><input class="input" id="i_wp" type="number" step="any" value="${it ? it.wholesale_price : 0}"/></div>
     </div>
-    <div class="field"><label>Low stock alert at</label><input class="input" id="i_low" type="number" step="any" value="${it ? it.low_stock : 0}"/><div class="hint">You'll see a warning when stock drops to this level (0 = off)</div></div>
+    <div class="row">
+      <div class="field" style="flex:1"><label>Sell price (Rs.)</label><input class="input" id="i_sp" type="number" step="any" value="${it ? it.sale_price : 0}"/></div>
+      <div class="field" style="flex:1"><label>MRP (Rs.)</label><input class="input" id="i_mrp" type="number" step="any" value="${it ? it.mrp : 0}"/></div>
+    </div>
+    <div class="row">
+      <div class="field" style="flex:1"><label>Stock on hand</label><input class="input" id="i_stock" type="number" step="any" value="${it ? it.stock : 0}"/></div>
+      <div class="field" style="flex:1"><label>Low stock alert at</label><input class="input" id="i_low" type="number" step="any" value="${it ? it.low_stock : 0}"/></div>
+    </div>
+    <div class="hint" style="color:var(--text-tertiary);font-size:12px">Wholesale and MRP are used as quick rate suggestions in sales and purchases (0 = off).</div>
   `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveItem">Save</button>`);
 
   wrap.querySelector('#saveItem').addEventListener('click', async () => {
     const body = {
       name: wrap.querySelector('#i_name').value.trim(),
+      category: wrap.querySelector('#i_cat').value.trim(),
       unit: wrap.querySelector('#i_unit').value,
       stock: Number(wrap.querySelector('#i_stock').value) || 0,
       purchase_price: Number(wrap.querySelector('#i_bp').value) || 0,
+      wholesale_price: Number(wrap.querySelector('#i_wp').value) || 0,
       sale_price: Number(wrap.querySelector('#i_sp').value) || 0,
+      mrp: Number(wrap.querySelector('#i_mrp').value) || 0,
       low_stock: Number(wrap.querySelector('#i_low').value) || 0,
     };
     if (!body.name) return toast('Item name is required', 'error');
@@ -754,7 +1013,12 @@ async function renderReports() {
       <div class="stat sale"><div class="s-label">Total sales</div><div class="s-value pos">${rs(d.byType.sale)}</div></div>
       <div class="stat purchase"><div class="s-label">Total purchases</div><div class="s-value">${rs(d.byType.purchase)}</div></div>
       <div class="stat expense"><div class="s-label">Total expenses</div><div class="s-value neg">${rs(d.byType.expense)}</div></div>
+      <div class="stat cash"><div class="s-label">Other income</div><div class="s-value pos">${rs(d.byType.other_income)}</div></div>
       <div class="stat profit"><div class="s-label">Profit / Loss</div><div class="s-value ${d.profit >= 0 ? 'pos' : 'neg'}">${rs(d.profit)}</div><div class="s-note">${d.byType.sale ? profitPct + '% margin' : ''}</div></div>
+    </div>
+    <div class="stats mt-16">
+      <div class="stat recv"><div class="s-label">VAT collected / paid</div><div class="s-value">${rs(d.vat)}</div><div class="s-note">On sales &amp; purchases with VAT%</div></div>
+      <div class="stat pay"><div class="s-label">Discounts given</div><div class="s-value neg">${rs(d.discount)}</div><div class="s-note">On sales &amp; purchases</div></div>
     </div>
     <div class="grid-2 mt-16">
       <div class="card card-pad"><h3 class="mb-16">Top selling items</h3>${topItemsHtml}</div>
@@ -834,11 +1098,31 @@ async function renderSettings() {
           <div class="field" style="flex:1"><label>Currency</label>
             <select class="select" id="b_cur"><option value="NPR" ${b.currency === 'NPR' ? 'selected' : ''}>NPR (रु)</option><option value="USD" ${b.currency === 'USD' ? 'selected' : ''}>USD ($)</option><option value="INR" ${b.currency === 'INR' ? 'selected' : ''}>INR (₹)</option></select>
           </div>
+          <div class="field" style="flex:1"><label>Invoice prefix</label><input class="input" id="b_prefix" maxlength="8" value="${esc(b.invoice_prefix || 'INV')}"/><div class="hint" style="color:var(--text-tertiary);font-size:12px">e.g. INV → INV-000123</div></div>
+        </div>
+        <div class="row">
           <div class="field" style="flex:1"><label>Fiscal year starts</label><input class="input" id="b_fy" type="date" value="${esc(b.fiscal_year_start)}"/></div>
+          <div class="field" style="flex:1"><label>EMI calculator</label><button class="btn" style="width:100%" onclick="emiModal()">📱 Open calculator</button></div>
         </div>
         <button class="btn btn-primary" onclick="saveBusiness()">Save changes</button>
       </div>
       <div>
+        <div class="card card-pad mb-16">
+          <h3 class="mb-16">Appearance</h3>
+          <div class="row spread" style="margin-bottom:14px">
+            <div><b>Dark mode</b><div class="hint" style="color:var(--text-tertiary);font-size:12px">Easy on the eyes at night</div></div>
+            <button class="btn btn-sm" onclick="toggleDark()">${state.dark ? '🌞 Light' : '🌙 Dark'}</button>
+          </div>
+          <div class="row spread">
+            <div><b>Font size</b><div class="hint" style="color:var(--text-tertiary);font-size:12px">Adjust the app text size</div></div>
+            <select class="select" style="width:120px" onchange="setFontSize(this.value)">
+              <option value="14" ${state.fontSize === 14 ? 'selected' : ''}>Small</option>
+              <option value="16" ${state.fontSize === 16 ? 'selected' : ''}>Normal</option>
+              <option value="18" ${state.fontSize === 18 ? 'selected' : ''}>Large</option>
+              <option value="20" ${state.fontSize === 20 ? 'selected' : ''}>Large +</option>
+            </select>
+          </div>
+        </div>
         <div class="card card-pad mb-16">
           <h3 class="mb-16">Backup & restore</h3>
           <p style="color:var(--text-secondary);margin-bottom:14px">Export all your data as a JSON file, or restore from a previous backup.</p>
@@ -881,6 +1165,7 @@ async function saveBusiness() {
     address: $('b_addr').value.trim(),
     currency: $('b_cur').value,
     fiscal_year_start: $('b_fy').value,
+    invoice_prefix: $('b_prefix').value.trim(),
   };
   if (!body.name) return toast('Business name is required', 'error');
   try {
@@ -891,6 +1176,57 @@ async function saveBusiness() {
     route();
   } catch (e) { toast(e.message, 'error'); }
 }
+
+function applyAppearance() {
+  const d = state.dark;
+  document.documentElement.classList.toggle('dark', d);
+  localStorage.setItem('lenden_dark', d ? '1' : '0');
+  document.documentElement.style.fontSize = (state.fontSize || 16) + 'px';
+  localStorage.setItem('lenden_font', String(state.fontSize || 16));
+}
+function toggleDark() {
+  state.dark = !state.dark;
+  applyAppearance();
+  route();
+}
+function setFontSize(v) {
+  state.fontSize = Number(v) || 16;
+  applyAppearance();
+}
+
+function emiModal() {
+  const wrap = openModal('EMI Calculator', `
+    <div class="field"><label>Loan amount (Rs.)</label><input class="input" id="emi_p" type="number" step="any" value="100000"/></div>
+    <div class="row">
+      <div class="field" style="flex:1"><label>Annual interest rate (%)</label><input class="input" id="emi_r" type="number" step="any" value="13"/></div>
+      <div class="field" style="flex:1"><label>Tenure (months)</label><input class="input" id="emi_n" type="number" step="1" value="12"/></div>
+    </div>
+    <div class="row">
+      <button class="btn btn-primary" onclick="calcEmi()">Calculate</button>
+      <button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Close</button>
+    </div>
+    <div id="emiResult" class="mt-8"></div>
+  `);
+}
+window.calcEmi = () => {
+  const wrap = document.querySelector('.modal-backdrop');
+  const P = Number((wrap.querySelector('#emi_p') || {}).value) || 0;
+  const r = (Number((wrap.querySelector('#emi_r') || {}).value) || 0) / 12 / 100;
+  const n = Number((wrap.querySelector('#emi_n') || {}).value) || 1;
+  const out = wrap.querySelector('#emiResult');
+  if (P <= 0 || n <= 0) { out.innerHTML = '<div class="empty">Enter valid values</div>'; return; }
+  let emi;
+  if (r === 0) emi = P / n;
+  else emi = P * r * Math.pow(1 + r, n) / (Math.pow(1 + r, n) - 1);
+  const total = emi * n;
+  const interest = total - P;
+  out.innerHTML = `
+    <div class="stats mt-8">
+      <div class="stat profit"><div class="s-label">Monthly EMI</div><div class="s-value">${rs(emi)}</div></div>
+      <div class="stat purchase"><div class="s-label">Total interest</div><div class="s-value neg">${rs(interest)}</div></div>
+      <div class="stat recv"><div class="s-label">Total repayment</div><div class="s-value">${rs(total)}</div></div>
+    </div>`;
+};
 
 async function exportData() {
   const j = await api('/export');
@@ -919,6 +1255,299 @@ function resetData() {
   });
 }
 
+/* ---------- Manage Accounts ---------- */
+async function renderAccounts() {
+  setTitle('Manage Accounts');
+  const d = await api('/accounts');
+  const typeLabel = { cash: 'Cash', bank: 'Bank', wallet: 'Wallet', card: 'Card', other: 'Other' };
+  const cards = d.accounts.map(a => `
+    <div class="card card-pad" style="display:flex;flex-direction:column;gap:10px;justify-content:space-between">
+      <div class="row spread">
+        <span class="badge ${a.type === 'cash' ? 'badge-warning' : a.type === 'bank' ? 'badge-info' : a.type === 'wallet' ? 'badge-success' : 'badge-soft'}">${typeLabel[a.type] || 'Other'}</span>
+        ${a.id ? `<button class="btn btn-sm btn-ghost" onclick="delAccount(${a.id})">🗑</button>` : '<span style="color:var(--text-tertiary);font-size:12px">from transactions</span>'}
+      </div>
+      <div>
+        <div style="font-weight:700;font-size:16px">${esc(a.name)}</div>
+        <div style="font-size:12px;color:var(--text-tertiary)">${fmt(a.in)} in · ${fmt(a.out)} out</div>
+      </div>
+      <div class="amount ${a.balance >= 0 ? 'pos' : 'neg'}" style="font-size:20px">${rs(a.balance)}</div>
+    </div>`).join('');
+
+  $('view').innerHTML = `
+    <div class="row spread">
+      <div><div class="page-title">Manage Accounts</div><div class="page-sub">Payment accounts used in your transactions</div></div>
+      <button class="btn btn-primary" onclick="addAccount()">+ Add account</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px" class="mt-8">
+      ${cards || '<div class="card empty">No accounts yet. Add your payment accounts or record transactions with a payment method.</div>'}
+    </div>`;
+}
+
+function addAccount() {
+  const wrap = openModal('Add account', `
+    <div class="field"><label>Account name *</label><input class="input" id="a_name" placeholder="e.g. Cash, Nepal Bank, Khalti, eSewa"/></div>
+    <div class="field"><label>Type</label>
+      <select class="select" id="a_type"><option value="cash">Cash</option><option value="bank">Bank</option><option value="wallet">Wallet</option><option value="card">Card</option><option value="other">Other</option></select>
+    </div>
+  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveAccount">Add</button>`);
+  wrap.querySelector('#saveAccount').addEventListener('click', async () => {
+    const body = { name: wrap.querySelector('#a_name').value.trim(), type: wrap.querySelector('#a_type').value };
+    if (!body.name) return toast('Account name is required', 'error');
+    try { await api('/accounts', { method: 'POST', body }); toast('Account added'); closeModal(wrap); route(); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+async function delAccount(id) {
+  const wrap = openModal('Delete account', `<p style="color:var(--text-secondary)">This removes the account name. Past transactions are kept unchanged.</p>`,
+    `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-danger" id="cDelA">Delete</button>`);
+  wrap.querySelector('#cDelA').addEventListener('click', async () => {
+    try { await api('/accounts/' + id, { method: 'DELETE' }); toast('Account deleted'); closeModal(wrap); route(); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+/* ---------- Import Data ---------- */
+function parseCSV(text) {
+  const rows = [];
+  let cur = '', row = [], inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+      else cur += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ',') { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(cur); cur = '';
+      if (row.length && row.some(x => x !== '')) rows.push(row);
+      row = [];
+    } else cur += c;
+  }
+  if (cur !== '' || row.length) { row.push(cur); if (row.some(x => x !== '')) rows.push(row); }
+  return rows;
+}
+
+function rowsToObjects(rows, mapping) {
+  if (!rows.length) return [];
+  const header = rows[0].map(h => h.trim().toLowerCase());
+  return rows.slice(1).map(r => {
+    const o = {};
+    header.forEach((h, i) => { if (mapping[h]) o[mapping[h]] = (r[i] || '').trim(); });
+    return o;
+  }).filter(o => Object.keys(o).length);
+}
+
+function readFileAsText(input) {
+  return new Promise((resolve, reject) => {
+    const f = input.files[0];
+    if (!f) return resolve(null);
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsText(f);
+  });
+}
+
+async function renderImport() {
+  setTitle('Import Data');
+  $('view').innerHTML = `
+    <div class="page-title">Import Data</div>
+    <div class="page-sub">Bring data into Len Den from a backup or CSV files</div>
+    <div class="grid-2">
+      <div class="card card-pad">
+        <h3 class="mb-16">Restore backup</h3>
+        <p style="color:var(--text-secondary);margin-bottom:14px">Upload a Len Den JSON backup. This replaces all current data.</p>
+        <div class="row">
+          <button class="btn btn-primary" onclick="document.getElementById('impJson').click()">⬆ Restore JSON backup</button>
+          <input type="file" id="impJson" accept=".json" class="hidden"/>
+        </div>
+      </div>
+      <div class="card card-pad">
+        <h3 class="mb-16">Import parties (CSV)</h3>
+        <p style="color:var(--text-secondary);margin-bottom:14px">Columns: <code>type,name,phone,address,email,opening_balance,note,category</code>. <code>type</code> is <code>customer</code> or <code>supplier</code>.</p>
+        <div class="row">
+          <button class="btn" onclick="document.getElementById('impParties').click()">⬆ Import parties</button>
+          <input type="file" id="impParties" accept=".csv,.txt" class="hidden"/>
+          <button class="btn btn-sm" onclick="dlTemplate('parties')">⬇ Template</button>
+        </div>
+      </div>
+      <div class="card card-pad">
+        <h3 class="mb-16">Import transactions (CSV)</h3>
+        <p style="color:var(--text-secondary);margin-bottom:14px">Columns: <code>type,date,party,item,quantity,rate,amount,discount,vat_percent,reminder_date,payment_method,note</code>. Parties and items are matched by name.</p>
+        <div class="row">
+          <button class="btn" onclick="document.getElementById('impTxn').click()">⬆ Import transactions</button>
+          <input type="file" id="impTxn" accept=".csv,.txt" class="hidden"/>
+          <button class="btn btn-sm" onclick="dlTemplate('txn')">⬇ Template</button>
+        </div>
+      </div>
+      <div class="card card-pad" style="border-color:#f3c5c7">
+        <h3 class="mb-16" style="color:var(--danger)">Reset all data</h3>
+        <p style="color:var(--text-secondary);margin-bottom:14px">Delete all transactions, parties and items. This cannot be undone.</p>
+        <button class="btn btn-danger" onclick="resetData()">Reset business data</button>
+      </div>
+    </div>`;
+
+  $('impJson').addEventListener('change', async e => {
+    const text = await readFileAsText(e.target);
+    if (!text) return;
+    try {
+      const data = JSON.parse(text);
+      await api('/import', { method: 'POST', body: data });
+      toast('Backup restored');
+      state.business = (await api('/me')).business;
+      await loadRefs(); route();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  $('impParties').addEventListener('change', async e => {
+    const text = await readFileAsText(e.target);
+    if (!text) return;
+    const rows = parseCSV(text);
+    const list = rowsToObjects(rows, { type: 'type', name: 'name', phone: 'phone', address: 'address', email: 'email', opening_balance: 'opening_balance', note: 'note', category: 'category' });
+    if (!list.length) return toast('No valid rows found in CSV', 'error');
+    try {
+      const j = await api('/import/csv/parties', { method: 'POST', body: list });
+      toast(j.count + ' party' + (j.count === 1 ? '' : 'ies') + ' imported');
+      await loadRefs(); route();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  $('impTxn').addEventListener('change', async e => {
+    const text = await readFileAsText(e.target);
+    if (!text) return;
+    const rows = parseCSV(text);
+    const list = rowsToObjects(rows, { type: 'type', date: 'date', party: 'party', item: 'item', quantity: 'quantity', rate: 'rate', amount: 'amount', discount: 'discount', vat_percent: 'vat_percent', reminder_date: 'reminder_date', payment_method: 'payment_method', note: 'note' });
+    if (!list.length) return toast('No valid rows found in CSV', 'error');
+    try {
+      const j = await api('/import/csv/transactions', { method: 'POST', body: list });
+      toast(j.count + ' transaction' + (j.count === 1 ? '' : 's') + ' imported');
+      await loadRefs(); route();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+function dlTemplate(which) {
+  const content = which === 'parties'
+    ? 'type,name,phone,address,email,opening_balance,note,category\ncustomer,Ram Shrestha,9841234567,Kathmandu,ram@example.com,0,,Retail\nsupplier,Hari Traders,9801234567,Lalitpur,,1000,,Wholesale\n'
+    : 'type,date,party,item,quantity,rate,amount,discount,vat_percent,reminder_date,payment_method,note\nsale,2026-08-07,Ram Shrestha,Notebook,2,50,100,0,0,,Cash,\npurchase,2026-08-06,Hari Traders,,,10,500,0,13,,Bank,\nexpense,2026-08-05,,,1,300,300,0,0,,Cash,Rent\n';
+  const blob = new Blob([content], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = which === 'parties' ? 'parties-template.csv' : 'transactions-template.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ---------- Refer & Win ---------- */
+async function renderRefer() {
+  setTitle('Refer & Win');
+  const code = 'LD' + String(state.business.id || 0).padStart(4, '0');
+  const link = location.origin + '/?ref=' + code;
+  const shareText = 'Use Len Den to manage your business khata, inventory and reports easily. Try it: ' + link;
+  $('view').innerHTML = `
+    <div class="page-title">Refer & Win</div>
+    <div class="page-sub">Invite fellow business owners and both of you get benefits</div>
+    <div class="card card-pad" style="background:linear-gradient(135deg,#6359e0,#8b7cf6);color:#fff;border:none">
+      <div class="row spread" style="flex-wrap:nowrap">
+        <div>
+          <div style="font-size:13px;opacity:.85">Your referral code</div>
+          <div style="font-size:34px;font-weight:800;letter-spacing:3px;margin-top:4px">${code}</div>
+        </div>
+        <button class="btn" style="background:#fff;color:#6359e0;font-weight:700" onclick="copyReferral('${link}')">📋 Copy link</button>
+      </div>
+    </div>
+    <div class="grid-2 mt-16">
+      <div class="card card-pad">
+        <h3 class="mb-16">How it works</h3>
+        ${[['Share your link', 'Send your referral link to other business owners.'],
+           ['They sign up', 'They create a Len Den business and start using it.'],
+           ['You both win', 'When they stay active, both of you get reward benefits.']]
+          .map((s, i) => `<div class="row" style="margin:12px 0"><span class="badge badge-primary" style="width:26px;height:26px;justify-content:center">${i + 1}</span><div><b>${s[0]}</b><div class="hint" style="color:var(--text-tertiary);font-size:12px">${s[1]}</div></div></div>`).join('')}
+      </div>
+      <div class="card card-pad">
+        <h3 class="mb-16">Share now</h3>
+        <button class="btn btn-block mb-16" onclick="shareReferral('whatsapp')">🟢 Share on WhatsApp</button>
+        <button class="btn btn-block mb-16" onclick="shareReferral('copy', '${link}')">📋 Copy referral link</button>
+        <div class="hint" style="color:var(--text-tertiary);font-size:12px">Referred business must be created with your link to count.</div>
+      </div>
+    </div>`;
+  window.__referLink = link;
+  window.__referShareText = shareText;
+}
+window.copyReferral = link => { navigator.clipboard && navigator.clipboard.writeText(link); toast('Referral link copied'); };
+window.shareReferral = (how, link) => {
+  if (how === 'whatsapp') {
+    window.open('https://api.whatsapp.com/send?text=' + encodeURIComponent(window.__referShareText || ''), '_blank');
+  } else {
+    window.copyReferral(link || window.__referLink);
+  }
+};
+
+/* ---------- Help & Support ---------- */
+async function renderHelp() {
+  setTitle('Help & Support');
+  const faqs = [
+    ['How do I add a party?', 'Go to Parties, click "+ Add party", choose Customer or Supplier, fill the details and save.'],
+    ['How do I record a sale?', 'Go to Sales, click "+ Add Sale", select the customer and amount (add an item to track inventory), then save.'],
+    ['How does the ledger work?', 'Each party has its own ledger. Open Parties, pick a party and click "Ledger" to see every transaction and the running balance.'],
+    ['How do I backup my data?', 'Go to Settings or Import Data and export a JSON backup, then download it to your device.'],
+    ['Why is my stock changing?', 'Sales reduce stock and purchases increase it automatically when you attach an item to the transaction.'],
+  ];
+  $('view').innerHTML = `
+    <div class="page-title">Help & Support</div>
+    <div class="page-sub">Frequently asked questions and ways to reach us</div>
+    <div class="grid-2">
+      <div class="card card-pad">
+        <h3 class="mb-16">Frequently asked questions</h3>
+        ${faqs.map((f, i) => `
+          <div class="faq" style="border-bottom:1px solid var(--border);padding:12px 0">
+            <button class="faq-q" onclick="this.parentElement.classList.toggle('open')" style="width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;cursor:pointer;font-weight:600;font-size:14px;font-family:inherit;color:var(--text);text-align:left">
+              ${f[0]} <span style="color:var(--text-tertiary)">▾</span>
+            </button>
+            <div class="faq-a hidden" style="color:var(--text-secondary);padding-top:8px;font-size:13px">${f[1]}</div>
+          </div>`).join('')}
+      </div>
+      <div class="card card-pad">
+        <h3 class="mb-16">Get in touch</h3>
+        <div class="row" style="margin-bottom:12px"><span style="font-size:20px">💬</span><div><b>WhatsApp</b><div class="hint" style="color:var(--text-tertiary);font-size:12px">Fastest way to reach support</div></div></div>
+        <button class="btn btn-block mb-16" onclick="window.open('https://api.whatsapp.com/send?text=' + encodeURIComponent('I need help with Len Den'))">Message support</button>
+        <div class="row" style="margin-bottom:12px"><span style="font-size:20px">📘</span><div><b>Tutorials</b><div class="hint" style="color:var(--text-tertiary);font-size:12px">Step-by-step guides in the Tutorials menu</div></div></div>
+        <button class="btn btn-block" onclick="go('tutorials')">Open tutorials</button>
+      </div>
+    </div>`;
+  $$('.faq .faq-q').forEach(b => b.addEventListener('click', () => {
+    b.parentElement.classList.toggle('open');
+    b.parentElement.querySelector('.faq-a').classList.toggle('hidden');
+  }));
+}
+
+/* ---------- Tutorials ---------- */
+async function renderTutorials() {
+  setTitle('Tutorials');
+  const guides = [
+    ['👥', 'Add your first party', ['Open the Parties menu.', 'Click "+ Add party".', 'Choose Customer or Supplier.', 'Enter name and phone, then Save.']],
+    ['🧾', 'Record a sale', ['Open the Sales menu.', 'Click "+ Add Sale".', 'Select the customer and enter the amount (optionally attach an item).', 'Click Save to update the ledger and stock.']],
+    ['📦', 'Track inventory', ['Open the Inventory menu and add your items with prices.', 'Attach an item when you record sales and purchases.', 'Stock updates automatically and low-stock warnings appear on the dashboard.']],
+    ['📈', 'Read the reports', ['Open the Reports menu.', 'Choose a time range: Today, 7 days, 30 days or All time.', 'See total sales, purchases, expenses and profit.']],
+    ['💾', 'Backup & restore', ['Go to Settings > Backup & restore.', 'Click "Export backup" to download your data as JSON.', 'Use Import Data to restore it anytime.']],
+  ];
+  $('view').innerHTML = `
+    <div class="page-title">Tutorials</div>
+    <div class="page-sub">Step-by-step guides to get the most out of Len Den</div>
+    <div class="grid-2">
+      ${guides.map(g => `
+        <div class="card card-pad">
+          <div style="font-size:26px;margin-bottom:8px">${g[0]}</div>
+          <h3 class="mb-8">${g[1]}</h3>
+          <ol style="color:var(--text-secondary);font-size:13px;line-height:1.7;padding-left:18px;margin-top:6px">
+            ${g[2].map(s => `<li>${s}</li>`).join('')}
+          </ol>
+        </div>`).join('')}
+    </div>`;
+}
+
 /* ---------- global exposure ---------- */
 window.go = go;
 window.setTxnType = setTxnType;
@@ -929,20 +1558,34 @@ window.setTxnTo = setTxnTo;
 window.resetTxnFilter = resetTxnFilter;
 window.pageTxn = pageTxn;
 window.addTxn = addTxn;
+window.addTxnOfType = addTxnOfType;
 window.editTxn = editTxn;
 window.delTxn = delTxn;
 window.setPartyTab = setPartyTab;
+window.setPartyQ = setPartyQ;
+window.setPartyCat = setPartyCat;
+window.setItemCat = setItemCat;
 window.addParty = addParty;
 window.editParty = editParty;
 window.delParty = delParty;
 window.viewLedger = viewLedger;
 window.addTxnForParty = addTxnForParty;
+window.waRemind = waRemind;
+window.adjustBalance = adjustBalance;
+window.viewInvoice = viewInvoice;
+window.setDaybookDate = setDaybookDate;
+window.toggleDark = toggleDark;
+window.setFontSize = setFontSize;
+window.emiModal = emiModal;
 window.addItem = addItem;
 window.editItem = editItem;
 window.delItem = delItem;
 window.setReportRange = setReportRange;
 window.addStaff = addStaff;
 window.delStaff = delStaff;
+window.addAccount = addAccount;
+window.delAccount = delAccount;
+window.dlTemplate = dlTemplate;
 window.saveBusiness = saveBusiness;
 window.exportData = exportData;
 window.resetData = resetData;

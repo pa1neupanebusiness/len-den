@@ -308,3 +308,43 @@ tbody tr:hover { background: var(--bg-soft); }
 }
 
 canvas.chart { width: 100%; height: 260px; }
+
+/* ---------- dark mode ---------- */
+html.dark {
+  --bg: #12141f;
+  --bg-soft: #0d0f18;
+  --surface: #1a1d2b;
+  --surface-hover: #22263a;
+  --border: #2a2e42;
+  --border-strong: #3a3f58;
+  --text: #eef0f8;
+  --text-secondary: #aeb3c7;
+  --text-tertiary: #6d738a;
+  --primary: #7c74ea;
+  --primary-hover: #8b83f0;
+  --primary-soft: #262a4a;
+  --success: #37c58b;
+  --success-soft: #1c2f2a;
+  --danger: #f26368;
+  --danger-soft: #3a2025;
+  --warning: #eeb04e;
+  --warning-soft: #382d1c;
+  --info: #5b96ff;
+  --info-soft: #1d2a44;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+html.dark .stat, html.dark .card { background: var(--surface); }
+html.dark .main { background: var(--bg-soft); }
+html.dark .input, html.dark .select { background: var(--bg); }
+html.dark .modal-backdrop { background: rgba(5, 6, 12, 0.7); }
+html.dark .seg button.active { background: var(--surface); }
+html.dark #invoicePrint { color: #000; }
+html.dark .toast { background: var(--surface); border: 1px solid var(--border); }
+html.dark .toast.error { border-color: var(--danger); }
+
+/* ---------- invoice printing ---------- */
+@media print {
+  body > * { display: none !important; }
+  #invoicePrint, #invoicePrint * { display: block !important; }
+}
