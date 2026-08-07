@@ -51,16 +51,17 @@ const puppeteer = require('puppeteer-core');
   await page.waitForSelector('.app', { timeout: 6000 });
   ok('logged in and app shell loaded', true);
 
-  // 3. dashboard renders stats
-  await page.waitForSelector('.stats .stat', { timeout: 6000 });
-  ok('dashboard stats rendered', (await page.$$('.stats .stat')).length >= 3);
+  // 3. dashboard renders balance cards + cashflow
+  await page.waitForSelector('.bal-card', { timeout: 6000 });
+  ok('dashboard balance cards rendered', (await page.$$('.bal-card')).length >= 3);
+  ok('dashboard cashflow rendered', (await page.$$('.cf-col')).length >= 5);
 
   // 4. sidebar has Karobar-style sections + all menu items (icons stripped)
   const sections = await page.$$eval('.nav-section', els => els.map(e => e.textContent.trim()));
   ok('menu sections = Business, Management, Business Tools, Others, Settings',
     JSON.stringify(sections) === JSON.stringify(['Business', 'Management', 'Business Tools', 'Others', 'Settings']));
   const labels = await page.$$eval('.nav-item', els => els.map(e => { const ico = e.querySelector('.ico'); const car = e.querySelector('.caret'); if (ico) ico.remove(); if (car) car.remove(); return e.textContent.trim(); }));
-  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Create Sales Invoice', 'Add Payment In', 'Create New Quotation', 'Create Sales Return', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Business Tools', 'Business Cards', 'Greeting Cards', 'Reminders', 'Bill Gallery', 'Barcode Generator', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings'];
+  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Create Sales Invoice', 'Add Payment In', 'Create New Quotation', 'Create Sales Return', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Browse Reports', 'Transactions', 'Parties', 'Inventory', 'Income Expense', 'Business Status', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Business Tools', 'Business Cards', 'Greeting Cards', 'Reminders', 'Bill Gallery', 'Barcode Generator', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings'];
   ok('menu items match Karobar list', JSON.stringify(labels) === JSON.stringify(expected));
 
   // 5. parties: add a customer with category
@@ -182,8 +183,8 @@ const puppeteer = require('puppeteer-core');
 
   // 16. business tools submenu
   await goView('business_cards', 'Business Cards');
-  await page.waitForSelector('#view #bc_party', { timeout: 5000 });
-  ok('business card generator renders', true);
+  await page.waitForSelector('#view #bc_yourName', { timeout: 5000 });
+  ok('business card generator renders', await page.evaluate(() => !!document.querySelector('#view #bcPreview')));
   await goView('greeting_cards', 'Greeting Cards');
   await page.waitForSelector('#view #gr_party', { timeout: 5000 });
   ok('greeting card templates present', await page.evaluate(() => !!document.querySelector('#view #gr_party')));
@@ -226,10 +227,10 @@ const puppeteer = require('puppeteer-core');
   ok('emi result computed', await page.evaluate(() => !!document.getElementById('emiResult').textContent.trim()));
   await page.evaluate(() => document.querySelector('.modal-backdrop [data-close]').click());
 
-  // 20. dashboard daybook
+  // 20. dashboard balance + cashflow
   await goView('dashboard', 'Dashboard');
-  await page.waitForFunction(() => document.body.textContent.includes('Daybook'), { timeout: 6000 });
-  ok('daybook section present', true);
+  await page.waitForFunction(() => document.body.textContent.includes('Cashflow'), { timeout: 6000 });
+  ok('cashflow section present', true);
 
   await browser.close();
   if (errors.length) {

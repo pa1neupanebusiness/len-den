@@ -207,6 +207,27 @@ app.put('/api/business', auth(), (req, res) => {
 
 /* ---------------- Dashboard ---------------- */
 
+const BS_MONTHS = ['Baishakh', 'Jestha', 'Ashadh', 'Shrawan', 'Bhadra', 'Ashwin', 'Kartik', 'Mangsir', 'Poush', 'Magh', 'Falgun', 'Chaitra'];
+const BS_STARTS = [[4, 14], [5, 15], [6, 15], [7, 17], [8, 18], [9, 18], [10, 19], [11, 18], [12, 18], [1, 16], [2, 14], [3, 15]];
+function bsMonthInfo(adDateStr) {
+  const [y, m, d] = String(adDateStr || '').split('-').map(Number);
+  const ord = (yy, mm, dd) => Date.UTC(yy, mm - 1, dd);
+  const tOrd = ord(y, m, d);
+  const cands = [];
+  for (const yy of [y - 1, y]) {
+    for (let i = 0; i < 12; i++) cands.push({ i, so: ord(yy, BS_STARTS[i][0], BS_STARTS[i][1]) });
+  }
+  cands.sort((a, b) => a.so - b.so);
+  let cur = cands[0], next = null;
+  for (let k = 0; k < cands.length; k++) {
+    if (cands[k].so <= tOrd) { cur = cands[k]; }
+    else { next = cands[k]; break; }
+  }
+  const from = new Date(cur.so).toISOString().slice(0, 10);
+  const to = next ? new Date(next.so - 86400000).toISOString().slice(0, 10) : from;
+  return { name: BS_MONTHS[cur.i], from, to };
+}
+
 app.get('/api/summary', auth(), (req, res) => {
   const b = req.business.id;
   const t = (sql) => db.prepare(sql).get(b);
@@ -232,7 +253,46 @@ app.get('/api/summary', auth(), (req, res) => {
 
   const monthly = db.prepare(`SELECT substr(date,1,7) m, type, SUM(amount) amt FROM transactions WHERE business_id=? GROUP BY m, type ORDER BY m DESC LIMIT 12`).all(b);
 
-  res.json({ today: todayTotals, todayCounts: tCounts, totalReceivable: recv, totalPayable: pay, recent, lowStock, monthly });
+  /* Cash & bank balances from payment methods. */
+  const accRows = db.prepare(`SELECT payment_method,
+    COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income') THEN amount ELSE 0 END),0) tin,
+    COALESCE(SUM(CASE WHEN type IN ('purchase','expense','payment_out') THEN amount ELSE 0 END),0) tout
+    FROM transactions WHERE business_id=? GROUP BY payment_method`).all(b);
+  const cashBank = accRows.reduce((s, r) => s + r.tin - r.tout, 0);
+  const cashHand = accRows.filter(r => String(r.payment_method || '').toLowerCase() === 'cash').reduce((s, r) => s + r.tin - r.tout, 0);
+
+  /* Nepali (BS) month totals for the current month. */
+  const bs = bsMonthInfo(today);
+  const bsRow = db.prepare(`SELECT type, COALESCE(SUM(amount),0) amt FROM transactions WHERE business_id=? AND date BETWEEN ? AND ? GROUP BY type`).all(b, bs.from, bs.to);
+  const bsTotals = { sale: 0, purchase: 0, expense: 0 };
+  bsRow.forEach(r => { if (bsTotals[r.type] != null) bsTotals[r.type] = r.amt; });
+
+  /* Cashflow for last 7 days. */
+  const cashflow = [];
+  for (let i = 6; i >= 0; i--) {
+    const dd = new Date(Date.now() - i * 86400000);
+    const ds = dd.toISOString().slice(0, 10);
+    const row = db.prepare(`SELECT
+        COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income','purchase_return') THEN amount ELSE 0 END),0) inflow,
+        COALESCE(SUM(CASE WHEN type IN ('purchase','payment_out','expense','sales_return') THEN amount ELSE 0 END),0) outflow
+      FROM transactions WHERE business_id=? AND date=?`).get(b, ds);
+    cashflow.push({ date: ds, inflow: row.inflow, outflow: row.outflow });
+  }
+
+  /* Cashflow for last 7 weeks (weekly totals). */
+  const cashflowWeekly = [];
+  for (let w = 6; w >= 0; w--) {
+    const end = new Date(Date.now() - w * 7 * 86400000);
+    const start = new Date(end.getTime() - 6 * 86400000);
+    const fs = start.toISOString().slice(0, 10), fe = end.toISOString().slice(0, 10);
+    const row = db.prepare(`SELECT
+        COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income','purchase_return') THEN amount ELSE 0 END),0) inflow,
+        COALESCE(SUM(CASE WHEN type IN ('purchase','payment_out','expense','sales_return') THEN amount ELSE 0 END),0) outflow
+      FROM transactions WHERE business_id=? AND date BETWEEN ? AND ?`).get(b, fs, fe);
+    cashflowWeekly.push({ label: w === 0 ? 'This wk' : (w + 'w ago'), inflow: row.inflow, outflow: row.outflow });
+  }
+
+  res.json({ today: todayTotals, todayCounts: tCounts, totalReceivable: recv, totalPayable: pay, recent, lowStock, monthly, cashBank, cashHand, bsMonth: bs.name, bsSale: bsTotals.sale, bsPurchase: bsTotals.purchase, bsExpense: bsTotals.expense, cashflow, cashflowWeekly });
 });
 
 /* ---------------- Parties ---------------- */

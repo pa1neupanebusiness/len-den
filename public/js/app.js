@@ -28,6 +28,8 @@ const state = {
   greeting: 'dashain',
   barcode: '',
   dark: localStorage.getItem('lenden_dark') === '1',
+  sidebarCollapsed: localStorage.getItem('lenden_side') === '1',
+  flowMode: 'daily',
   fontSize: Number(localStorage.getItem('lenden_font')) || 16,
 };
 
@@ -188,8 +190,19 @@ async function boot() {
   navBind();
   await loadRefs();
   applyAppearance();
+  applySidebar();
   route();
 }
+
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  localStorage.setItem('lenden_side', state.sidebarCollapsed ? '1' : '0');
+  applySidebar();
+}
+function applySidebar() {
+  document.getElementById('appRoot').classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+}
+function setFlowMode(m) { state.flowMode = m; route(); }
 
 function navBind() {
   $$('.nav-item').forEach(el => {
@@ -274,10 +287,9 @@ async function renderDashboard() {
   setTitle('Dashboard');
   const d = await api('/summary');
   const s = d.today;
-  const income = s.sale + s.payment_in + s.other_income;
-  const outcome = s.purchase + s.expense + s.payment_out;
-  const net = income - outcome;
   const txnTypes = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], other_income: ['Other income', 'success'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
+  const biz = (state.business && state.business.name) || 'My Business';
+  const owner = (state.user && state.user.name) || 'Owner';
 
   const recentHtml = d.recent.length ? d.recent.map(t => {
     const meta = txnTypes[t.type] || [t.type, 'soft'];
@@ -296,75 +308,112 @@ async function renderDashboard() {
       <span class="badge badge-danger">${fmt(i.stock)} left</span>
     </div>`).join('') : '<div class="empty">All stock is healthy</div>';
 
-  const monthly = (d.monthly || []).slice(0, 6).reverse();
-  const agg = {};
-  monthly.forEach(m => { agg[m.m] = agg[m.m] || { sale: 0, out: 0 }; if (m.type === 'sale') agg[m.m].sale += m.amt; else if (['purchase', 'expense'].includes(m.type)) agg[m.m].out += m.amt; });
-  const mlab = Object.keys(agg);
-  const mSalesA = mlab.map(k => agg[k].sale);
-  const mKeys = Object.keys(agg);
-  const curMonth = mKeys[mKeys.length - 1];
-  const curProfit = curMonth ? agg[curMonth].sale - agg[curMonth].out : 0;
-  const salesCount = d.todayCounts ? d.todayCounts.sale : 0;
-
-  const day = await api('/daybook?date=' + (state.daybookDate || today()));
-  const dayRows = day.transactions.length ? day.transactions.map(t => {
-    const meta = txnTypes[t.type] || [t.type, 'soft'];
-    return `<tr>
-      <td><span class="badge badge-${meta[1]}">${meta[0]}</span></td>
-      <td>${esc(t.party_name || t.item_name || t.note || '—')}</td>
-      <td class="amount ${['sale', 'payment_in', 'other_income'].includes(t.type) ? 'pos' : 'neg'}">${rs(t.amount)}</td>
-      <td style="color:var(--text-tertiary);font-size:12px">${esc(t.ref_no || '')}</td>
-    </tr>`;
-  }).join('') : '<tr><td colspan="4"><div class="empty">Nothing recorded on this day</div></td></tr>';
+  const cf = (state.flowMode === 'weekly' ? d.cashflowWeekly : d.cashflow) || [];
+  const cfLabels = cf.map((c, i) => {
+    if (state.flowMode === 'weekly') return c.label;
+    const dd = new Date(c.date + 'T00:00:00');
+    return dd.toLocaleDateString('en-GB', { weekday: 'short' }).slice(0, 2);
+  });
+  const cfMax = Math.max(...cf.map(c => Math.max(c.inflow, c.outflow)), 1);
+  const cfBars = cf.map((c, i) => `
+    <div class="cf-col" title="${prettyDate(c.date)}">
+      <div class="cf-bars">
+        <div class="cf-in" style="height:${Math.round((c.inflow / cfMax) * 140)}px"></div>
+        <div class="cf-out" style="height:${Math.round((c.outflow / cfMax) * 140)}px"></div>
+      </div>
+      <div class="cf-day">${cfLabels[i]}</div>
+      <div class="cf-val">${fmt(Math.max(c.inflow, c.outflow))}</div>
+    </div>`).join('');
 
   $('view').innerHTML = `
-    <div class="stats">
-      <div class="stat sale"><div class="s-label">Today's Sales <span>🧾</span></div><div class="s-value pos">${rs(s.sale)}</div><div class="s-note">${salesCount ? salesCount + ' sale' + (salesCount === 1 ? '' : 's') + ' today' : 'No sales today'}</div></div>
-      <div class="stat purchase"><div class="s-label">Today's Purchases <span>🛒</span></div><div class="s-value">${rs(s.purchase)}</div></div>
-      <div class="stat expense"><div class="s-label">Today's Expenses <span>💸</span></div><div class="s-value neg">${rs(s.expense)}</div></div>
-      <div class="stat cash"><div class="s-label">Net cash today <span>💵</span></div><div class="s-value ${net >= 0 ? 'pos' : 'neg'}">${rs(net)}</div><div class="s-note">In ${rs(income)} · Out ${rs(outcome)}</div></div>
+    <div class="dash-hero">
+      <div>
+        <div class="greet">Welcome ${esc(owner)} 👋</div>
+        <div class="sub">${esc(biz)}</div>
+      </div>
+      <span class="new-badge"><span style="background:var(--primary);color:#fff;font-size:10px;padding:2px 6px;border-radius:6px">NEW</span> Quick POS</span>
     </div>
-    <div class="stats mt-16">
-      <div class="stat recv"><div class="s-label">Total Receivable <span>👥</span></div><div class="s-value">${rs(d.totalReceivable)}</div><div class="s-note">What customers owe you</div></div>
-      <div class="stat pay"><div class="s-label">Total Payable <span>🧑‍🤝‍🧑</span></div><div class="s-value">${rs(d.totalPayable)}</div><div class="s-note">What you owe suppliers</div></div>
-      <div class="stat profit"><div class="s-label">This month's profit <span>📈</span></div><div class="s-value ${curProfit >= 0 ? 'pos' : 'neg'}">${rs(curProfit)}</div><div class="s-note">Sales − purchases − expenses</div></div>
+    <div class="dash-quick">
+      <button class="q-btn sale" onclick="go('sales')">🧾 <span>Add Sales</span></button>
+      <button class="q-btn purchase" onclick="go('purchase')">🛒 <span>Add Purchase</span></button>
+      <button class="q-btn more" onclick="openMoreModal()">➕ <span>Add More</span></button>
+    </div>
+    <div class="bal-grid">
+      <div class="bal-card recv">
+        <div class="bl">To Receive</div>
+        <div class="bv pos">${rs(d.totalReceivable)}</div>
+        <div class="bn">What customers owe you</div>
+      </div>
+      <div class="bal-card pay">
+        <div class="bl">To Give</div>
+        <div class="bv neg">${rs(d.totalPayable)}</div>
+        <div class="bn">What you owe suppliers</div>
+      </div>
+      <div class="bal-card total">
+        <div class="bl">Total Balance (Cash & Bank)</div>
+        <div class="bv">${rs(d.cashBank)}</div>
+        <div class="bn">Across all payment methods</div>
+        <div class="big-note">Cash in hand: ${rs(d.cashHand)}</div>
+      </div>
+    </div>
+    <div class="bal-grid">
+      <div class="bal-card total">
+        <div class="bl">Sales (${d.bsMonth})</div>
+        <div class="bv pos">${rs(d.bsSale)}</div>
+        <div class="bn">This Nepali month</div>
+      </div>
+      <div class="bal-card total">
+        <div class="bl">Purchase (${d.bsMonth})</div>
+        <div class="bv">${rs(d.bsPurchase)}</div>
+        <div class="bn">This Nepali month</div>
+      </div>
+      <div class="bal-card total">
+        <div class="bl">Expense (${d.bsMonth})</div>
+        <div class="bv neg">${rs(d.bsExpense)}</div>
+        <div class="bn">This Nepali month</div>
+      </div>
+    </div>
+    <div class="dash-cashflow">
+      <div class="cf-head">
+        <div class="cf-title">Cashflow (Last 7 Days)</div>
+        <div class="seg">
+          <button class="${state.flowMode === 'daily' ? 'active' : ''}" onclick="setFlowMode('daily')">Daily</button>
+          <button class="${state.flowMode === 'weekly' ? 'active' : ''}" onclick="setFlowMode('weekly')">Weekly</button>
+        </div>
+      </div>
+      <div class="cf-bar-row">
+        <div class="cf-col" style="max-width:60px;justify-content:center;gap:4px">
+          <div class="cf-val" style="color:var(--success)">▲ In</div>
+          <div class="cf-val" style="color:var(--danger)">▼ Out</div>
+        </div>
+        ${cfBars}
+      </div>
     </div>
     <div class="grid-2 mt-16">
-      <div class="card card-pad">
-        <div class="row spread mb-16"><h3>Sales vs Expenses</h3><span class="badge badge-soft">6 months</span></div>
-        ${mSalesA.length ? `<canvas class="chart" id="chartMain"></canvas>` : '<div class="empty">Not enough data</div>'}
-      </div>
       <div class="card card-pad">
         <div class="row spread mb-16"><h3>Low stock alert</h3><button class="btn btn-sm" onclick="go('items')">Manage</button></div>
         ${lowHtml}
       </div>
-    </div>
-    <div class="card card-pad mt-16">
-      <div class="row spread mb-16"><h3>Recent transactions</h3><button class="btn btn-sm" onclick="go('khata')">View all</button></div>
-      <div class="table-wrap"><table><thead><tr><th>Type</th><th>Party / Item</th><th>Amount</th><th>Date</th></tr></thead><tbody>${recentHtml}</tbody></table></div>
-    </div>
-    <div class="grid-2 mt-16">
       <div class="card card-pad">
-        <div class="row spread mb-16"><h3>Daybook</h3><input type="date" class="input" style="width:160px" value="${state.daybookDate || today()}" onchange="setDaybookDate(this.value)"/></div>
-        <div class="stats mt-8">
-          <div class="stat recv" style="border:none;box-shadow:none"><div class="s-label">Money in</div><div class="s-value pos" style="font-size:18px">${rs(day.inflow)}</div></div>
-          <div class="stat pay" style="border:none;box-shadow:none"><div class="s-label">Money out</div><div class="s-value neg" style="font-size:18px">${rs(day.outflow)}</div></div>
-        </div>
-        <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Type</th><th>Details</th><th>Amount</th><th>Ref</th></tr></thead><tbody>${dayRows}</tbody></table></div>
-      </div>
-      <div class="card card-pad">
-        <h3 class="mb-16">Quick tools</h3>
-        <button class="btn btn-block mb-16" onclick="emiModal()">📱 EMI calculator</button>
-        <button class="btn btn-block mb-16" onclick="go('reports')">📈 View reports</button>
-        <button class="btn btn-block" onclick="go('tutorials')">📘 Tutorials</button>
+        <div class="row spread mb-16"><h3>Recent transactions</h3><button class="btn btn-sm" onclick="go('khata')">View all</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Type</th><th>Party / Item</th><th>Amount</th><th>Date</th></tr></thead><tbody>${recentHtml}</tbody></table></div>
       </div>
     </div>`;
+}
 
-  if (mSalesA.length) {
-    requestAnimationFrame(() => {
-      barChart('chartMain', mlab.map(k => k.slice(5) + '/' + k.slice(2, 4)), mSalesA, '#6359e0');
-    });
-  }
+function openMoreModal() {
+  const items = [
+    ['💸', 'Add Expense', 'expense'],
+    ['💰', 'Other Income', 'other_income'],
+    ['💵', 'Add Payment In', 'payment_in'],
+    ['💳', 'Payment Out', 'payment_out'],
+    ['↩️', 'Sales Return', 'sales_return'],
+    ['↪️', 'Purchase Return', 'purchase_return'],
+    ['📝', 'New Quotation', 'quotations'],
+    ['🧾', 'Sales Invoice', 'sales_invoices'],
+    ['🏦', 'Manage Accounts', 'accounts'],
+  ].map(([ico, label, view]) => `<button class="btn btn-block" style="justify-content:flex-start" onclick="go('${view}')">${ico} ${label}</button>`).join('');
+  openModal('Add More', `<div class="grid-2">${items}</div>`);
 }
 
 function go(v) {
