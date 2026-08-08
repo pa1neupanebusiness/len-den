@@ -472,3 +472,7 @@ html.dark .toast.error { border-color: var(--danger); }
 .cf-out { background: var(--danger); }
 .cf-day { font-size: 11px; color: var(--text-tertiary); font-weight: 600; }
 .cf-val { font-size: 10px; color: var(--text-tertiary); font-weight: 600; }
+
+/* ---------- Journal ---------- */
+.jline { display: grid; grid-template-columns: 1fr 110px 110px 36px; gap: 8px; margin-bottom: 8px; align-items: center; }
+.jfoot { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; color: var(--text-secondary); }

@@ -58,10 +58,10 @@ const puppeteer = require('puppeteer-core');
 
   // 4. sidebar has Karobar-style sections + all menu items (icons stripped)
   const sections = await page.$$eval('.nav-section', els => els.map(e => e.textContent.trim()));
-  ok('menu sections = Business, Management, Business Tools, Others, Settings',
-    JSON.stringify(sections) === JSON.stringify(['Business', 'Management', 'Business Tools', 'Others', 'Settings']));
+  ok('menu sections = Business, Management, Others, Settings',
+    JSON.stringify(sections) === JSON.stringify(['Business', 'Management', 'Others', 'Settings']));
   const labels = await page.$$eval('.nav-item', els => els.map(e => { const ico = e.querySelector('.ico'); const car = e.querySelector('.caret'); if (ico) ico.remove(); if (car) car.remove(); return e.textContent.trim(); }));
-  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Create Sales Invoice', 'Add Payment In', 'Create New Quotation', 'Create Sales Return', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Browse Reports', 'Transactions', 'Parties', 'Inventory', 'Income Expense', 'Business Status', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Business Tools', 'Business Cards', 'Greeting Cards', 'Reminders', 'Bill Gallery', 'Barcode Generator', 'Refer & Win', 'Help & Support', 'Tutorials', 'Settings'];
+  const expected = ['Dashboard', 'Parties', 'Inventory', 'Sales', 'Create Sales Invoice', 'Add Payment In', 'Create New Quotation', 'Create Sales Return', 'EMI Sales', 'Purchase', 'Purchase', 'Payment Out', 'Purchase Return', 'Expense', 'Other Income', 'Manage Accounts', 'Reports', 'Browse Reports', 'Transactions', 'Parties', 'Inventory', 'Income Expense', 'Business Status', 'Journal Entry', 'Manage Staffs', 'Import Data', 'Import Parties', 'Import Items', 'Help & Support', 'Tutorials', 'Settings'];
   ok('menu items match Karobar list', JSON.stringify(labels) === JSON.stringify(expected));
 
   // 5. parties: add a customer with category
@@ -181,28 +181,56 @@ const puppeteer = require('puppeteer-core');
   await page.waitForSelector('#view #impItems', { timeout: 5000 });
   ok('import items view has upload input', true);
 
-  // 16. business tools submenu
-  await goView('business_cards', 'Business Cards');
-  await page.waitForSelector('#view #bc_yourName', { timeout: 5000 });
-  ok('business card generator renders', await page.evaluate(() => !!document.querySelector('#view #bcPreview')));
-  await goView('greeting_cards', 'Greeting Cards');
-  await page.waitForSelector('#view #gr_party', { timeout: 5000 });
-  ok('greeting card templates present', await page.evaluate(() => !!document.querySelector('#view #gr_party')));
-  await goView('reminders', 'Reminders');
-  await goView('bill_gallery', 'Bill Gallery');
-  ok('bill gallery upload present', await page.evaluate(() => !!document.querySelector('#view input[type=file]')));
-  await goView('barcode', 'Barcode Generator');
-  await page.waitForSelector('#view #bc_code', { timeout: 5000 });
-  ok('barcode generator has value input', true);
+  // 16. reports submenu: category views render
+  await goView('report_cat_transactions', 'Transactions');
+  await page.waitForSelector('#view .stats .stat', { timeout: 5000 });
+  ok('report transactions view renders', (await page.$$('#view .stats .stat')).length >= 3);
+  await goView('report_cat_parties', 'Parties');
+  ok('report parties view renders', (await page.$$('#view .stats .stat')).length >= 2);
+  await goView('report_cat_inventory', 'Inventory');
+  ok('report inventory view renders', await page.evaluate(() => !!document.querySelector('#view .table-wrap')));
+  await goView('report_cat_income', 'Income Expense');
+  ok('report income expense view renders', (await page.$$('#view .stats .stat')).length >= 4);
+  await goView('report_cat_status', 'Business Status');
+  ok('report business status view renders', await page.evaluate(() => document.body.textContent.includes('Net profit')));
 
   // 16b. submenu expand/collapse
   await page.click('.nav-parent[data-expands="sales"]');
   ok('sales submenu collapses on parent click', await page.evaluate(() => !document.getElementById('sub-sales').classList.contains('open')));
   await page.click('.nav-parent[data-expands="sales"]');
 
-  // 17. refer & win
-  await goView('refer', 'Refer & Win');
-  ok('referral code shown', (await page.evaluate(() => document.body.textContent.includes('referral code'))));
+  // 16c. journal entry: add a balanced voucher
+  await goView('journal', 'Journal Entries');
+  await clickAdd('New Entry');
+  await page.type('#j_desc', 'Opening balance entry');
+  await page.evaluate(() => {
+    const lines = document.querySelectorAll('#jlines .jline');
+    const acc = lines[0].querySelector('select');
+    acc.value = acc.options[1] ? acc.options[1].value : '';
+    lines.forEach(l => { l.querySelector('select').value = acc.value; });
+    lines[0].querySelector('.jdb').value = '100';
+    lines[1].querySelector('.jcr').value = '100';
+    lines[0].querySelector('.jdb').dispatchEvent(new Event('input', { bubbles: true }));
+    lines[1].querySelector('.jcr').dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.click('#saveJournal');
+  await page.waitForFunction(() => !document.querySelector('.modal'), { timeout: 5000 });
+  ok('journal entry saved appears in list', await page.evaluate(() => document.body.textContent.includes('Opening balance entry')));
+
+  // 16d. EMI sale: create with down payment
+  await goView('emis', 'EMI Sales');
+  await clickAdd('New EMI');
+  await page.evaluate(() => {
+    const cust = document.querySelector('#e_party option:nth-child(2)');
+    const item = document.querySelector('#e_item option:nth-child(2)');
+    if (cust) document.querySelector('#e_party').value = cust.value;
+    if (item) document.querySelector('#e_item').value = item.value;
+  });
+  await setVal('#e_total', '1000');
+  await setVal('#e_down', '200');
+  await page.click('#saveEmi');
+  await page.waitForFunction(() => !document.querySelector('.modal'), { timeout: 5000 });
+  ok('emi sale saved appears in list', await page.evaluate(() => document.body.textContent.includes('EMI-')));
 
   // 17. help & support
   await goView('help', 'Help & Support');

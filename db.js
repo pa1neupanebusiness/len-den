@@ -208,6 +208,7 @@ if (!hasCol('transactions', 'reminder_date')) db.exec("ALTER TABLE transactions 
 if (!hasCol('transactions', 'ref_no')) db.exec("ALTER TABLE transactions ADD COLUMN ref_no TEXT DEFAULT ''");
 if (!hasCol('users', 'email')) db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''");
 if (!hasCol('users', 'google_id')) db.exec("ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''");
+if (!hasCol('accounts', 'balance')) db.exec('ALTER TABLE accounts ADD COLUMN balance REAL DEFAULT 0');
 
 /* Backfill transaction reference numbers. */
 db.exec(`UPDATE transactions SET ref_no = (SELECT COALESCE(b.invoice_prefix,'INV') FROM businesses b WHERE b.id = transactions.business_id) || '-' || printf('%06d', transactions.id)
@@ -222,6 +223,59 @@ db.exec(`CREATE TABLE IF NOT EXISTS reminders (
   done INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+);`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS journal_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_id INTEGER NOT NULL,
+  entry_date TEXT NOT NULL,
+  reference TEXT DEFAULT '',
+  description TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS journal_lines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL,
+  account_id INTEGER NOT NULL,
+  debit REAL DEFAULT 0,
+  credit REAL DEFAULT 0,
+  FOREIGN KEY (entry_id) REFERENCES journal_entries(id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS emis (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_id INTEGER NOT NULL,
+  emi_number TEXT NOT NULL,
+  item_id INTEGER NOT NULL,
+  party_id INTEGER NOT NULL,
+  quantity REAL DEFAULT 1,
+  product_total REAL NOT NULL,
+  down_payment REAL DEFAULT 0,
+  net_amount REAL NOT NULL,
+  remaining_amount REAL NOT NULL,
+  total_paid REAL DEFAULT 0,
+  interest_rate REAL DEFAULT 0,
+  paid_status TEXT DEFAULT 'pending',
+  payment_method TEXT DEFAULT 'cash',
+  bank_name TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
+  FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE,
+  FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS emi_payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  emi_id INTEGER NOT NULL,
+  payment_date TEXT NOT NULL,
+  amount REAL NOT NULL,
+  principal REAL NOT NULL,
+  interest REAL NOT NULL,
+  method TEXT DEFAULT 'cash',
+  reference TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (emi_id) REFERENCES emis(id) ON DELETE CASCADE
 );`);
 
 function begin() {

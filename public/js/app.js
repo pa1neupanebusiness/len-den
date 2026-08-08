@@ -265,6 +265,13 @@ async function route() {
     else if (v === 'ledger') await renderLedger();
     else if (v === 'items') await renderItems();
     else if (v === 'reports') await renderReports();
+    else if (v === 'report_cat_transactions') await renderReportCat('report_cat_transactions');
+    else if (v === 'report_cat_parties') await renderReportCat('report_cat_parties');
+    else if (v === 'report_cat_inventory') await renderReportCat('report_cat_inventory');
+    else if (v === 'report_cat_income') await renderReportCat('report_cat_income');
+    else if (v === 'report_cat_status') await renderReportCat('report_cat_status');
+    else if (v === 'journal') await renderJournal();
+    else if (v === 'emis') await renderEmis();
     else if (v === 'staff') await renderStaff();
     else if (v === 'import_parties') await renderImport('parties');
     else if (v === 'import_items') await renderImport('items');
@@ -1222,6 +1229,79 @@ async function renderReports() {
 }
 function setReportRange(r) { state.reportRange = r; route(); }
 
+function setRepFrom(v) { state.repFrom = v || rangeDays(30); route(); }
+function setRepTo(v) { state.repTo = v || today(); route(); }
+
+async function renderReportCat(slug) {
+  const meta = {
+    report_cat_transactions: { title: 'Transactions', sub: 'All entries for the selected period', api: 'transaction', useRange: true },
+    report_cat_parties: { title: 'Parties', sub: 'Customers & suppliers with their balances', api: 'all_parties', useRange: false },
+    report_cat_inventory: { title: 'Inventory', sub: 'Items with sold & purchased quantities', api: 'item_list', useRange: false },
+    report_cat_income: { title: 'Income Expense', sub: 'Income, expenses, received and paid', api: 'income_expense', useRange: true },
+    report_cat_status: { title: 'Business Status', sub: 'Sales, expenses and net profit / loss', api: 'profit_loss', useRange: true },
+  };
+  const m = meta[slug] || meta.report_cat_transactions;
+  setTitle(m.title);
+  const q = new URLSearchParams({ from: state.repFrom, to: state.repTo }).toString();
+  const d = await api('/report/' + m.api + (m.useRange ? '?' + q : ''));
+
+  let body = '';
+  if (slug === 'report_cat_transactions') {
+    const txnTypes = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], other_income: ['Other income', 'success'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'], sales_return: ['Sales return', 'warning'], purchase_return: ['Purchase return', 'info'], quotation: ['Quotation', 'soft'] };
+    const rows = (d.rows || []).map(t => `<tr>
+      <td>${prettyDate(t.date)}</td>
+      <td><span class="badge badge-${(txnTypes[t.type] || [t.type, 'soft'])[1]}">${(txnTypes[t.type] || [t.type])[0]}</span></td>
+      <td><b>${esc(t.party_name || t.item_name || t.note || '—')}</b>${t.ref_no ? `<div class="hint" style="color:var(--text-tertiary);font-size:11px">${esc(t.ref_no)}</div>` : ''}</td>
+      <td class="amount ${['sale', 'payment_in', 'other_income', 'purchase_return'].includes(t.type) ? 'pos' : 'neg'}">${rs(t.amount)}</td>
+    </tr>`).join('');
+    body = `
+    <div class="stats mt-8">
+      <div class="stat"><div class="s-label">Inflow</div><div class="s-value pos">${rs(d.inflow || 0)}</div></div>
+      <div class="stat"><div class="s-label">Outflow</div><div class="s-value neg">${rs(d.outflow || 0)}</div></div>
+      <div class="stat"><div class="s-label">Net</div><div class="s-value ${((d.inflow || 0) - (d.outflow || 0)) >= 0 ? 'pos' : 'neg'}">${rs((d.inflow || 0) - (d.outflow || 0))}</div></div>
+    </div>
+    <div class="card card-pad mt-8"><div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Party / Note</th><th>Amount</th></tr></thead><tbody>${rows || '<tr><td colspan="4"><div class="empty">No entries in this period</div></td></tr>'}</tbody></table></div></div>`;
+  } else if (slug === 'report_cat_parties') {
+    const partyRow = p => `<tr><td style="font-weight:600">${esc(p.name)}</td><td>${esc(p.phone || '—')}</td><td>${esc(p.address || '—')}</td><td><span class="badge ${p.type === 'customer' ? 'badge-success' : 'badge-info'}">${p.type === 'customer' ? 'Customer' : 'Supplier'}</span></td><td class="amount ${p.balance >= 0 ? 'pos' : 'neg'}">${rs(p.balance)}</td></tr>`;
+    const rows = [...(d.customers || []), ...(d.suppliers || [])].map(partyRow).join('');
+    body = `
+    <div class="stats mt-8">
+      <div class="stat recv"><div class="s-label">Receivable</div><div class="s-value pos">${rs(d.receivable || 0)}</div></div>
+      <div class="stat pay"><div class="s-label">Payable</div><div class="s-value neg">${rs(d.payable || 0)}</div></div>
+    </div>
+    <div class="card card-pad mt-8"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Address</th><th>Type</th><th>Balance</th></tr></thead><tbody>${rows || '<tr><td colspan="5"><div class="empty">No parties yet</div></td></tr>'}</tbody></table></div></div>`;
+  } else if (slug === 'report_cat_inventory') {
+    const rows = (d.items || []).map(i => `<tr>
+      <td style="font-weight:600">${esc(i.name)}</td><td>${esc(i.code || '—')}</td><td>${esc(i.unit)}</td>
+      <td>${fmt(i.stock)}</td><td class="pos">${fmt(i.sold_qty || 0)}</td><td class="amount pos">${rs(i.sold_amt || 0)}</td>
+      <td class="neg">${fmt(i.bought_qty || 0)}</td><td class="amount neg">${rs(i.bought_amt || 0)}</td>
+    </tr>`).join('');
+    body = `
+    <div class="card card-pad mt-8"><div class="table-wrap"><table><thead><tr><th>Item</th><th>Code</th><th>Unit</th><th>Stock</th><th>Sold</th><th>Sale value</th><th>Bought</th><th>Purchase value</th></tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty">No items yet</div></td></tr>'}</tbody></table></div></div>`;
+  } else if (slug === 'report_cat_income') {
+    const cells = [['Income', d.income || 0], ['Expense', d.expense || 0], ['Received', d.received || 0], ['Paid', d.paid || 0]]
+      .map(([l, v]) => `<div class="stat"><div class="s-label">${l}</div><div class="s-value ${(l === 'Expense' || l === 'Paid') ? 'neg' : 'pos'}">${rs(v)}</div></div>`).join('');
+    body = `<div class="stats mt-8">${cells}</div>`;
+  } else {
+    const net = (d.sale || 0) + (d.other_income || 0) + (d.purchase_return || 0) - (d.purchase || 0) - (d.expense || 0) - (d.sales_return || 0);
+    const cells = [['Sales', d.sale || 0, 'pos'], ['Purchases', d.purchase || 0, 'neg'], ['Other income', d.other_income || 0, 'pos'], ['Expenses', d.expense || 0, 'neg'], ['Sales returns', d.sales_return || 0, 'neg'], ['Purchase returns', d.purchase_return || 0, 'pos']]
+      .map(([l, v, c]) => `<div class="stat"><div class="s-label">${l}</div><div class="s-value ${c}">${rs(v)}</div></div>`).join('');
+    body = `
+    <div class="stats mt-8">${cells}</div>
+    <div class="card card-pad mt-8"><div class="row spread"><span class="page-sub" style="font-weight:700">Net profit / loss</span><span class="amount ${net >= 0 ? 'pos' : 'neg'}" style="font-size:22px;font-weight:800">${rs(net)}</span></div></div>`;
+  }
+
+  $('view').innerHTML = `
+    <div class="row spread">
+      <div><div class="page-title">${m.title}</div><div class="page-sub">${m.sub || ''}</div></div>
+      ${m.useRange ? `<div class="row" style="gap:8px;align-items:center">
+        <input type="date" class="input" style="width:150px" value="${state.repFrom}" onchange="setRepFrom(this.value)"/>
+        <span style="color:var(--text-tertiary)">to</span>
+        <input type="date" class="input" style="width:150px" value="${state.repTo}" onchange="setRepTo(this.value)"/>
+      </div>` : ''}
+    </div>${body}`;
+}
+
 /* ---------- Staff ---------- */
 async function renderStaff() {
   setTitle('Staff');
@@ -1476,6 +1556,292 @@ async function delAccount(id) {
     catch (e) { toast(e.message, 'error'); }
   });
 }
+
+/* ---------- Journal Entries ---------- */
+async function renderJournal() {
+  setTitle('Journal Entries');
+  const d = await api('/journal');
+  const ledgerHtml = d.ledger.length ? d.ledger.map(l => `
+    <div class="row spread" style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div><b>${esc(l.name)}</b><div class="hint" style="color:var(--text-tertiary);font-size:11px">${l.type}</div></div>
+      <span class="amount ${l.balance >= 0 ? 'pos' : 'neg'}">${rs(l.balance)}</span>
+    </div>`).join('') : '<div class="empty">No postings yet. Journal entries will update account balances here.</div>';
+
+  const rows = d.entries.map(e => `
+    <tr>
+      <td>${prettyDate(e.entry_date)}</td>
+      <td>${esc(e.reference || '—')}</td>
+      <td><b>${esc(e.description || '')}</b><div class="hint" style="color:var(--text-tertiary);font-size:11px">${e.lines.length} lines</div></td>
+      <td class="amount pos">${rs(e.debit)}</td>
+      <td class="amount neg">${rs(e.credit)}</td>
+      <td>
+        <button class="btn btn-sm" onclick="viewJournalEntry(${e.id})">View</button>
+        <button class="btn btn-sm btn-danger" onclick="delJournalEntry(${e.id})">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  $('view').innerHTML = `
+    <div class="row spread">
+      <div><div class="page-title">Journal Entries</div><div class="page-sub">Double-entry vouchers with posted account balances</div></div>
+      <button class="btn btn-primary" onclick="journalModal()">+ New Entry</button>
+    </div>
+    <div class="card card-pad mt-8">
+      <div class="row spread"><div class="page-sub" style="font-weight:700">Ledger balances (from journal postings)</div></div>
+      ${ledgerHtml}
+    </div>
+    <div class="card card-pad mt-8">
+      <div class="table-wrap">
+        <table><thead><tr><th>Date</th><th>Reference</th><th>Description</th><th>Debit</th><th>Credit</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6"><div class="empty">No journal entries yet. Create your first voucher.</div></td></tr>'}</tbody></table>
+      </div>
+    </div>`;
+}
+
+function journalAccountOpts(sel) {
+  return `<option value="">— Select —</option>` + (window.__journalAccounts || []).map(a => `<option value="${a.id}" ${Number(sel) === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
+}
+function journalLineHtml(idx) {
+  return `<div class="jline">
+    <select class="select jacc" onchange="journalRecalc()">${journalAccountOpts('')}</select>
+    <input class="input jdb" type="number" step="any" min="0" placeholder="Debit" value="" oninput="journalRecalc()"/>
+    <input class="input jcr" type="number" step="any" min="0" placeholder="Credit" value="" oninput="journalRecalc()"/>
+    <button class="btn btn-sm btn-ghost" onclick="journalDelLine(this)">✕</button>
+  </div>`;
+}
+window.journalRecalc = () => {
+  const wrap = document.getElementById('jlines');
+  if (!wrap) return;
+  let tD = 0, tC = 0;
+  wrap.querySelectorAll('.jline').forEach(l => {
+    tD += Number(l.querySelector('.jdb').value) || 0;
+    tC += Number(l.querySelector('.jcr').value) || 0;
+  });
+  const dEl = document.getElementById('jDTotal'), cEl = document.getElementById('jCTotal'), fEl = document.getElementById('jDiff');
+  if (!dEl || !cEl || !fEl) return;
+  dEl.textContent = fmt(tD);
+  cEl.textContent = fmt(tC);
+  const diff = Math.round((tD - tC) * 100) / 100;
+  fEl.textContent = fmt(diff);
+  fEl.className = diff === 0 ? 'pos' : 'neg';
+};
+window.journalAddLine = () => {
+  const wrap = document.getElementById('jlines');
+  if (wrap) wrap.insertAdjacentHTML('beforeend', journalLineHtml(wrap.children.length));
+  journalRecalc();
+};
+window.journalDelLine = btn => {
+  const wrap = document.getElementById('jlines');
+  if (wrap.children.length <= 2) return toast('At least two lines are required', 'error');
+  btn.closest('.jline').remove();
+  journalRecalc();
+};
+window.journalModal = async () => {
+  if (!window.__journalAccounts) {
+    const d = await api('/accounts');
+    window.__journalAccounts = d.accounts.filter(a => a.id);
+  }
+  const wrap = openModal('New Journal Entry', `
+    <div class="field"><label>Description *</label><input class="input" id="j_desc" placeholder="e.g. Owner capital injection"/></div>
+    <div class="field" style="display:flex;gap:10px">
+      <div style="flex:1"><label>Date</label><input class="input" id="j_date" type="date" value="${today()}"/></div>
+      <div style="flex:1"><label>Reference</label><input class="input" id="j_ref" placeholder="optional"/></div>
+    </div>
+    <div class="field"><label>Journal lines</label><div id="jlines">${journalLineHtml(0)}${journalLineHtml(1)}</div>
+      <button class="btn btn-sm mt-8" onclick="journalAddLine()">+ Add line</button>
+    </div>
+    <div class="jfoot">
+      <span>Debit: <b id="jDTotal">0</b></span>
+      <span>Credit: <b id="jCTotal">0</b></span>
+      <span>Diff: <b id="jDiff" class="pos">0</b></span>
+    </div>
+  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveJournal">Save Entry</button>`);
+  journalRecalc();
+  wrap.querySelector('#saveJournal').addEventListener('click', async () => {
+    const desc = wrap.querySelector('#j_desc').value.trim();
+    if (!desc) return toast('Description is required', 'error');
+    const lines = Array.from(wrap.querySelectorAll('#jlines .jline')).map(l => ({
+      account_id: Number(l.querySelector('.jacc').value) || null,
+      debit: Number(l.querySelector('.jdb').value) || 0,
+      credit: Number(l.querySelector('.jcr').value) || 0,
+    }));
+    try {
+      await api('/journal', { method: 'POST', body: { entry_date: wrap.querySelector('#j_date').value, reference: wrap.querySelector('#j_ref').value, description: desc, lines } });
+      toast('Journal entry saved');
+      closeModal(wrap);
+      route();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+};
+window.viewJournalEntry = async id => {
+  const d = await api('/journal/' + id);
+  const e = d.entry;
+  const lineRows = e.lines.map(l => `
+    <tr><td>${esc(l.account_name)}</td><td class="amount pos">${l.debit ? rs(l.debit) : '—'}</td><td class="amount neg">${l.credit ? rs(l.credit) : '—'}</td></tr>`).join('');
+  openModal('Journal Entry', `
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Date</span><b>${prettyDate(e.entry_date)}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Reference</span><b>${esc(e.reference || '—')}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Description</span><b>${esc(e.description || '')}</b></div>
+    <div class="table-wrap mt-8"><table><thead><tr><th>Account</th><th>Debit</th><th>Credit</th></tr></thead><tbody>${lineRows}</tbody></table></div>
+  `);
+};
+window.delJournalEntry = async id => {
+  const wrap = openModal('Delete journal entry', `<p style="color:var(--text-secondary)">This reverses the posted balances and removes the voucher.</p>`,
+    `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-danger" id="cDelJ">Delete</button>`);
+  wrap.querySelector('#cDelJ').addEventListener('click', async () => {
+    try { await api('/journal/' + id, { method: 'DELETE' }); toast('Journal entry deleted'); closeModal(wrap); route(); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+};
+
+/* ---------- EMI Sales ---------- */
+async function renderEmis() {
+  setTitle('EMI Sales');
+  const d = await api('/emis');
+  const outstanding = d.emis.reduce((s, e) => s + (e.remaining_amount || 0), 0);
+  const active = d.emis.filter(e => e.paid_status !== 'completed').length;
+  const completed = d.emis.length - active;
+  const statusBadge = { pending: 'badge-warning', partial: 'badge-info', completed: 'badge-success' };
+  const rows = d.emis.map(e => `
+    <tr>
+      <td><b>${esc(e.emi_number)}</b></td>
+      <td>${esc(e.party ? e.party.name : '—')}</td>
+      <td>${esc(e.item ? e.item.name : '—')}</td>
+      <td>${prettyDate(e.created_at.slice(0, 10))}</td>
+      <td class="amount">${rs(e.product_total)}</td>
+      <td class="amount">${rs(e.down_payment)}</td>
+      <td class="amount ${e.remaining_amount > 0 ? 'neg' : 'pos'}">${rs(e.remaining_amount)}</td>
+      <td><span class="badge ${statusBadge[e.paid_status] || 'badge-soft'}">${e.paid_status}</span></td>
+      <td>
+        <button class="btn btn-sm" onclick="emiDetail(${e.id})">Detail</button>
+        ${e.remaining_amount > 0 ? `<button class="btn btn-sm btn-primary" onclick="payEmi(${e.id})">Pay</button>` : ''}
+      </td>
+    </tr>`).join('');
+
+  $('view').innerHTML = `
+    <div class="row spread">
+      <div><div class="page-title">EMI Sales</div><div class="page-sub">Installment sales with down payment and amortized collections</div></div>
+      <button class="btn btn-primary" onclick="emiSaleModal()">+ New EMI</button>
+    </div>
+    <div class="stats mt-8">
+      <div class="stat"><div class="s-label">Outstanding</div><div class="s-value">${rs(outstanding)}</div></div>
+      <div class="stat"><div class="s-label">Active EMIs</div><div class="s-value">${active}</div></div>
+      <div class="stat"><div class="s-label">Completed</div><div class="s-value">${completed}</div></div>
+    </div>
+    <div class="card card-pad mt-8">
+      <div class="table-wrap">
+        <table><thead><tr><th>EMI No.</th><th>Customer</th><th>Item</th><th>Date</th><th>Total</th><th>Down</th><th>Remaining</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="9"><div class="empty">No EMI sales yet.</div></td></tr>'}</tbody></table>
+      </div>
+    </div>`;
+}
+
+window.emiSaleModal = async () => {
+  const [p, it] = await Promise.all([api('/parties'), api('/items')]);
+  const customers = p.parties.filter(p2 => p2.type === 'customer');
+  const custOpts = `<option value="">— Select —</option>` + customers.map(p2 => `<option value="${p2.id}">${esc(p2.name)}</option>`).join('');
+  const itemOpts = `<option value="">— Select —</option>` + it.items.map(i => `<option value="${i.id}">${esc(i.name)} (${fmt(i.stock)} ${i.unit})</option>`).join('');
+  const wrap = openModal('New EMI Sale', `
+    <div class="field"><label>Customer *</label><select class="select" id="e_party">${custOpts}</select></div>
+    <div class="field"><label>Item *</label><select class="select" id="e_item">${itemOpts}</select></div>
+    <div class="field" style="display:flex;gap:10px">
+      <div style="flex:1"><label>Quantity</label><input class="input" id="e_qty" type="number" min="1" value="1"/></div>
+      <div style="flex:1"><label>Interest rate (%)</label><input class="input" id="e_rate" type="number" step="any" value="0"/></div>
+    </div>
+    <div class="field"><label>Product total (Rs.) *</label><input class="input" id="e_total" type="number" step="any" value="" oninput="emiPreview()"/></div>
+    <div class="field"><label>Down payment (Rs.)</label><input class="input" id="e_down" type="number" step="any" value="0" oninput="emiPreview()"/></div>
+    <div class="field" style="display:flex;gap:10px">
+      <div style="flex:1"><label>Payment method</label>
+        <select class="select" id="e_method"><option value="cash">Cash</option><option value="bank">Bank</option><option value="qr">QR</option><option value="other">Other</option></select>
+      </div>
+      <div style="flex:1"><label>Account / Bank</label><input class="input" id="e_bank" placeholder="e.g. Cash Box"/></div>
+    </div>
+    <div class="jfoot"><span>Net amount: <b id="e_net">—</b></span><span>Remaining: <b id="e_rem">—</b></span></div>
+  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveEmi">Save EMI</button>`);
+  window.emiPreview = () => {
+    const t = Number(wrap.querySelector('#e_total').value) || 0;
+    const d = Number(wrap.querySelector('#e_down').value) || 0;
+    const net = Math.round((t - d) * 100) / 100;
+    wrap.querySelector('#e_net').textContent = rs(Math.max(net, 0));
+    wrap.querySelector('#e_rem').textContent = rs(Math.max(net, 0));
+  };
+  wrap.querySelector('#saveEmi').addEventListener('click', async () => {
+    const body = {
+      party_id: Number(wrap.querySelector('#e_party').value) || null,
+      item_id: Number(wrap.querySelector('#e_item').value) || null,
+      quantity: Number(wrap.querySelector('#e_qty').value) || 1,
+      interest_rate: Number(wrap.querySelector('#e_rate').value) || 0,
+      product_total: Number(wrap.querySelector('#e_total').value) || 0,
+      down_payment: Number(wrap.querySelector('#e_down').value) || 0,
+      payment_method: wrap.querySelector('#e_method').value,
+      bank_name: wrap.querySelector('#e_bank').value.trim(),
+    };
+    if (!body.party_id) return toast('Select a customer', 'error');
+    if (!body.item_id) return toast('Select an item', 'error');
+    try {
+      await api('/emis', { method: 'POST', body });
+      toast('EMI sale saved');
+      closeModal(wrap);
+      route();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+};
+
+window.emiDetail = async id => {
+  const d = await api('/emis/' + id);
+  const e = d.emi;
+  const statusBadge = { pending: 'badge-warning', partial: 'badge-info', completed: 'badge-success' };
+  const payRows = e.payments.map(p => `
+    <tr><td>${prettyDate(p.payment_date)}</td><td>${rs(p.amount)}</td><td class="pos">${rs(p.principal)}</td><td class="neg">${rs(p.interest)}</td><td>${esc(p.reference || p.method)}</td></tr>`).join('');
+  openModal('EMI ' + e.emi_number, `
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Customer</span><b>${esc(e.party ? e.party.name : '—')}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Item</span><b>${esc(e.item ? e.item.name : '—')}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Product total</span><b>${rs(e.product_total)}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Down payment</span><b>${rs(e.down_payment)}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Remaining</span><b>${rs(e.remaining_amount)}</b></div>
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Status</span><span class="badge ${statusBadge[e.paid_status] || 'badge-soft'}">${e.paid_status}</span></div>
+    <div class="table-wrap mt-8"><table><thead><tr><th>Date</th><th>Amount</th><th>Principal</th><th>Interest</th><th>Reference</th></tr></thead><tbody>${payRows || '<tr><td colspan="5"><div class="empty">No payments recorded</div></td></tr>'}</tbody></table></div>
+  `);
+};
+
+window.payEmi = async id => {
+  const d = await api('/emis/' + id);
+  const e = d.emi;
+  const wrap = openModal('Record EMI Payment — ' + e.emi_number, `
+    <div class="field" style="flex-direction:row;justify-content:space-between"><span>Remaining balance</span><b>${rs(e.remaining_amount)}</b></div>
+    <div class="field"><label>Payment amount (Rs.) *</label><input class="input" id="em_amount" type="number" step="any" min="0" value="${e.remaining_amount}" oninput="emiPayPreview()"/></div>
+    <div class="field" style="display:flex;gap:10px">
+      <div style="flex:1"><label>Interest rate (%)</label><input class="input" id="em_rate" type="number" step="any" value="${e.interest_rate || 0}" oninput="emiPayPreview()"/></div>
+      <div style="flex:1"><label>Method</label>
+        <select class="select" id="em_method"><option value="cash" ${e.payment_method === 'cash' ? 'selected' : ''}>Cash</option><option value="bank" ${e.payment_method === 'bank' ? 'selected' : ''}>Bank</option><option value="qr" ${e.payment_method === 'qr' ? 'selected' : ''}>QR</option><option value="other" ${e.payment_method === 'other' ? 'selected' : ''}>Other</option></select>
+      </div>
+    </div>
+    <div class="jfoot"><span>Principal: <b id="em_principal">—</b></span><span>Interest: <b id="em_interest">—</b></span><span>New balance: <b id="em_new">—</b></span></div>
+  `, `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Cancel</button><button class="btn btn-primary" id="saveEmiPay">Record Payment</button>`);
+  window.emiPayPreview = () => {
+    const amt = Number(wrap.querySelector('#em_amount').value) || 0;
+    const bal = e.remaining_amount || 0;
+    const rate = Number(wrap.querySelector('#em_rate').value) || 0;
+    const interest = Math.round((bal * rate / 12 / 100) * 100) / 100;
+    const principal = Math.max(0, Math.round((amt - interest) * 100) / 100);
+    wrap.querySelector('#em_principal').textContent = rs(principal);
+    wrap.querySelector('#em_interest').textContent = rs(interest);
+    wrap.querySelector('#em_new').textContent = rs(Math.max(0, Math.round((bal - principal) * 100) / 100));
+  };
+  emiPayPreview();
+  wrap.querySelector('#saveEmiPay').addEventListener('click', async () => {
+    const body = {
+      amount: Number(wrap.querySelector('#em_amount').value) || 0,
+      interest_rate: Number(wrap.querySelector('#em_rate').value) || 0,
+      method: wrap.querySelector('#em_method').value,
+    };
+    try {
+      await api('/emis/' + id + '/pay', { method: 'POST', body });
+      toast('Payment recorded');
+      closeModal(wrap);
+      route();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+};
 
 /* ---------- Import Data ---------- */
 function parseCSV(text) {

@@ -1032,6 +1032,184 @@ app.post('/api/import/csv/items', auth(), (req, res) => {
   }
 });
 
+/* ---------------- Journal Entries ---------------- */
+
+function validateJournal(lines) {
+  if (!Array.isArray(lines) || lines.length < 2) return { err: 'At least two journal lines are required' };
+  let totalDebit = 0, totalCredit = 0;
+  const clean = [];
+  for (const l of lines) {
+    const debit = Number(l.debit) || 0;
+    const credit = Number(l.credit) || 0;
+    if (!l.account_id) return { err: 'Every journal line requires an account' };
+    if (debit < 0 || credit < 0) return { err: 'Journal amounts cannot be negative' };
+    if (debit > 0 && credit > 0) return { err: 'A journal line cannot be both debit and credit' };
+    if (debit === 0 && credit === 0) return { err: 'Zero-amount journal lines are not allowed' };
+    totalDebit += debit;
+    totalCredit += credit;
+    clean.push({ account_id: Number(l.account_id), debit, credit });
+  }
+  if (Math.abs(totalDebit - totalCredit) > 0.01) {
+    return { err: 'Debit and credit totals must be equal (' + totalDebit.toFixed(2) + ' vs ' + totalCredit.toFixed(2) + ')' };
+  }
+  return { clean, totalDebit, totalCredit };
+}
+
+/* Apply a posting effect to account balances. sign = 1 posts, -1 reverses. */
+function postJournalLines(businessId, lines, sign) {
+  for (const l of lines) {
+    const a = db.prepare('SELECT id FROM accounts WHERE id=? AND business_id=?').get(l.account_id, businessId);
+    if (!a) throw new Error('Journal line references an invalid account');
+    db.prepare('UPDATE accounts SET balance = balance + ? WHERE id=?').run(sign * (l.debit - l.credit), l.account_id);
+  }
+}
+
+function journalEntryRow(businessId, e) {
+  const lines = db.prepare(`SELECT jl.*, a.name account_name, a.type account_type FROM journal_lines jl JOIN accounts a ON a.id=jl.account_id WHERE jl.entry_id=? ORDER BY jl.id`).all(e.id);
+  const debit = Math.round(lines.reduce((s, l) => s + l.debit, 0) * 100) / 100;
+  const credit = Math.round(lines.reduce((s, l) => s + l.credit, 0) * 100) / 100;
+  return { ...e, lines, debit, credit };
+}
+
+app.get('/api/journal', auth(), (req, res) => {
+  const entries = db.prepare('SELECT * FROM journal_entries WHERE business_id=? ORDER BY entry_date DESC, id DESC').all(req.business.id);
+  const ledger = db.prepare(`SELECT a.id, a.name, a.type, COALESCE(SUM(jl.debit - jl.credit),0) balance
+    FROM accounts a LEFT JOIN journal_lines jl ON jl.account_id=a.id
+    WHERE a.business_id=? GROUP BY a.id HAVING balance != 0 ORDER BY a.name COLLATE NOCASE`).all(req.business.id);
+  res.json({ entries: entries.map(e => journalEntryRow(req.business.id, e)), ledger });
+});
+
+app.get('/api/journal/:id', auth(), (req, res) => {
+  const e = db.prepare('SELECT * FROM journal_entries WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!e) return bad('Journal entry not found')(res);
+  res.json({ entry: journalEntryRow(req.business.id, e) });
+});
+
+app.post('/api/journal', auth(), (req, res) => {
+  const { entry_date, reference, description, lines } = req.body;
+  const parsed = validateJournal(lines);
+  if (parsed.err) return bad(parsed.err)(res);
+  if (!description || !String(description).trim()) return bad('Description is required')(res);
+  begin();
+  try {
+    const r = db.prepare('INSERT INTO journal_entries (business_id, entry_date, reference, description) VALUES (?,?,?,?)')
+      .run(req.business.id, entry_date || new Date().toISOString().slice(0, 10), reference || '', String(description).trim());
+    for (const l of parsed.clean) {
+      db.prepare('INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES (?,?,?,?)').run(r.lastInsertRowid, l.account_id, l.debit, l.credit);
+    }
+    postJournalLines(req.business.id, parsed.clean, 1);
+    commit();
+    const e = db.prepare('SELECT * FROM journal_entries WHERE id=?').get(r.lastInsertRowid);
+    res.status(201).json({ ok: true, entry: journalEntryRow(req.business.id, e) });
+  } catch (e) {
+    rollback();
+    return bad('Failed to save journal entry')(res);
+  }
+});
+
+app.delete('/api/journal/:id', auth(), (req, res) => {
+  const e = db.prepare('SELECT * FROM journal_entries WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!e) return bad('Journal entry not found')(res);
+  const lines = db.prepare('SELECT * FROM journal_lines WHERE entry_id=?').all(e.id);
+  begin();
+  try {
+    postJournalLines(req.business.id, lines, -1);
+    db.prepare('DELETE FROM journal_lines WHERE entry_id=?').run(e.id);
+    db.prepare('DELETE FROM journal_entries WHERE id=?').run(e.id);
+    commit();
+    res.json({ ok: true });
+  } catch (e2) {
+    rollback();
+    return bad('Failed to delete journal entry')(res);
+  }
+});
+
+/* ---------------- EMI ---------------- */
+
+function calculateAmortization(balance, payment, interestRate) {
+  const interest = Math.round((balance * (Number(interestRate) || 0) / 12 / 100) * 100) / 100;
+  const principal = Math.max(0, Math.round((payment - interest) * 100) / 100);
+  return { interest, principal, newBalance: Math.max(0, Math.round((balance - principal) * 100) / 100) };
+}
+
+function emiRow(businessId, e) {
+  const it = db.prepare('SELECT id, name, unit, sale_price FROM items WHERE id=?').get(e.item_id);
+  const party = db.prepare('SELECT id, name, phone FROM parties WHERE id=?').get(e.party_id);
+  const payments = db.prepare('SELECT * FROM emi_payments WHERE emi_id=? ORDER BY payment_date ASC, id ASC').all(e.id);
+  return { ...e, item: it || null, party: party || null, payments };
+}
+
+app.get('/api/emis', auth(), (req, res) => {
+  const list = db.prepare('SELECT * FROM emis WHERE business_id=? ORDER BY id DESC').all(req.business.id);
+  res.json({ emis: list.map(e => emiRow(req.business.id, e)) });
+});
+
+app.get('/api/emis/:id', auth(), (req, res) => {
+  const e = db.prepare('SELECT * FROM emis WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!e) return bad('EMI not found')(res);
+  res.json({ emi: emiRow(req.business.id, e) });
+});
+
+app.post('/api/emis', auth(), (req, res) => {
+  const { item_id, party_id, product_total, down_payment, quantity, payment_method, bank_name, interest_rate } = req.body;
+  const it = db.prepare('SELECT * FROM items WHERE id=? AND business_id=?').get(Number(item_id), req.business.id);
+  if (!it) return bad('Item not found')(res);
+  const party = db.prepare('SELECT * FROM parties WHERE id=? AND business_id=?').get(Number(party_id), req.business.id);
+  if (!party) return bad('Party not found')(res);
+  if (it.type !== 'service' && (Number(it.stock) || 0) < 1) return bad('Insufficient stock for ' + it.name)(res);
+  const total = Math.round((Number(product_total) || 0) * 100) / 100;
+  const down = Math.round((Number(down_payment) || 0) * 100) / 100;
+  if (total <= 0) return bad('Product total must be greater than zero')(res);
+  if (down < 0 || down > total) return bad('Down payment cannot exceed the product total')(res);
+  const net = Math.round((total - down) * 100) / 100;
+  const qty = Number(quantity) || 1;
+  const method = ['cash', 'bank', 'qr', 'other'].includes(payment_method) ? payment_method : 'cash';
+  const maxId = db.prepare('SELECT COALESCE(MAX(id),0) m FROM emis WHERE business_id=?').get(req.business.id).m;
+  const emiNumber = 'EMI-' + String(maxId + 1).padStart(3, '0');
+  begin();
+  try {
+    const r = db.prepare('INSERT INTO emis (business_id, emi_number, item_id, party_id, quantity, product_total, down_payment, net_amount, remaining_amount, total_paid, interest_rate, paid_status, payment_method, bank_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(req.business.id, emiNumber, it.id, party.id, qty, total, down, net, net, down, Number(interest_rate) || 0, net > 0 ? 'partial' : 'completed', method, bank_name || '');
+    db.prepare('UPDATE items SET stock = stock - ? WHERE id=?').run(qty, it.id);
+    if (down > 0) {
+      db.prepare('INSERT INTO emi_payments (emi_id, payment_date, amount, principal, interest, method, reference) VALUES (?,?,?,?,?,?,?)')
+        .run(r.lastInsertRowid, new Date().toISOString().slice(0, 10), down, down, 0, method, emiNumber + '-DOWN');
+    }
+    commit();
+    const e = db.prepare('SELECT * FROM emis WHERE id=?').get(r.lastInsertRowid);
+    res.status(201).json({ ok: true, emi: emiRow(req.business.id, e) });
+  } catch (e) {
+    rollback();
+    return bad('Failed to save EMI')(res);
+  }
+});
+
+app.post('/api/emis/:id/pay', auth(), (req, res) => {
+  const e = db.prepare('SELECT * FROM emis WHERE id=? AND business_id=?').get(req.params.id, req.business.id);
+  if (!e) return bad('EMI not found')(res);
+  const amount = Math.round((Number(req.body.amount) || 0) * 100) / 100;
+  if (amount <= 0) return bad('Invalid payment amount')(res);
+  const remaining = e.remaining_amount || 0;
+  if (amount > remaining) return bad('Payment exceeds remaining balance of ' + remaining)(res);
+  const rate = req.body.interest_rate === undefined ? e.interest_rate : Number(req.body.interest_rate);
+  const { interest, principal, newBalance } = calculateAmortization(remaining, amount, rate);
+  const method = ['cash', 'bank', 'qr', 'other'].includes(req.body.method) ? req.body.method : e.payment_method;
+  const ref = 'EMI-' + e.emi_number + '-PYMT';
+  begin();
+  try {
+    db.prepare('INSERT INTO emi_payments (emi_id, payment_date, amount, principal, interest, method, reference) VALUES (?,?,?,?,?,?,?)')
+      .run(e.id, new Date().toISOString().slice(0, 10), amount, principal, interest, method, ref);
+    db.prepare('UPDATE emis SET total_paid = total_paid + ?, remaining_amount = ?, paid_status = ? WHERE id=?')
+      .run(principal, newBalance, newBalance === 0 ? 'completed' : 'partial', e.id);
+    commit();
+    const u = db.prepare('SELECT * FROM emis WHERE id=?').get(e.id);
+    res.json({ ok: true, emi: emiRow(req.business.id, u) });
+  } catch (err) {
+    rollback();
+    return bad('Failed to record EMI payment')(res);
+  }
+});
+
 /* ---------------- Pages ---------------- */
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'app.html')));
