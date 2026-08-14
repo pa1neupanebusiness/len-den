@@ -12,7 +12,8 @@
     "test": "node test/ui-test.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "better-sqlite3": "^11.0.0"
   },
   "devDependencies": {
     "puppeteer-core": "^25.5.0"
