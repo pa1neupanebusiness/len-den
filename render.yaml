@@ -3,8 +3,5 @@ services:
     name: len-den
     runtime: node
     region: oregon
-    buildCommand: npm install
+    buildCommand: npm install --production
     startCommand: node server.js
-    envVars:
-      - key: NODE_VERSION
-        value: 22.5.0

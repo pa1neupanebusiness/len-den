@@ -4,11 +4,12 @@
   "description": "Len Den - Nepali business management (khata) app, a working clone of Karobar",
   "main": "server.js",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "build": "npm install --production",
     "test": "node test/ui-test.js"
   },
   "dependencies": {
