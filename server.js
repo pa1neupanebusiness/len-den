@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '20mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: false }));
 
 const otpStore = new Map(); // phone -> { otp, expires }
 const googleStateStore = new Map(); // state -> { expires }
@@ -238,8 +238,10 @@ app.get('/api/summary', auth(), (req, res) => {
 
   const recv = db.prepare(`SELECT COALESCE(SUM(p.opening_balance),0) ob FROM parties p WHERE p.business_id=? AND p.type='customer'`).get(b).ob
     + db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type='sale' THEN t.amount WHEN t.type IN ('payment_in','sales_return') THEN -t.amount ELSE 0 END),0) v FROM transactions t WHERE t.business_id=? AND t.type IN ('sale','payment_in','sales_return')`).get(b).v;
+  const recvDue = db.prepare(`SELECT COALESCE(SUM(t.due_amount),0) v FROM transactions t WHERE t.business_id=? AND t.type='sale' AND t.due_amount > 0`).get(b).v;
   const pay = db.prepare(`SELECT COALESCE(SUM(p.opening_balance),0) ob FROM parties p WHERE p.business_id=? AND p.type='supplier'`).get(b).ob
     + db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.type='purchase' THEN t.amount WHEN t.type IN ('payment_out','purchase_return') THEN -t.amount ELSE 0 END),0) v FROM transactions t WHERE t.business_id=? AND t.type IN ('purchase','payment_out','purchase_return')`).get(b).v;
+  const payDue = db.prepare(`SELECT COALESCE(SUM(t.due_amount),0) v FROM transactions t WHERE t.business_id=? AND t.type='purchase' AND t.due_amount > 0`).get(b).v;
 
   const recent = db.prepare(`SELECT t.*, p.name party_name, i.name item_name FROM transactions t
     LEFT JOIN parties p ON p.id = t.party_id LEFT JOIN items i ON i.id = t.item_id
@@ -253,11 +255,11 @@ app.get('/api/summary', auth(), (req, res) => {
 
   const monthly = db.prepare(`SELECT substr(date,1,7) m, type, SUM(amount) amt FROM transactions WHERE business_id=? GROUP BY m, type ORDER BY m DESC LIMIT 12`).all(b);
 
-  /* Cash & bank balances from payment methods. */
+  /* Cash & bank balances from payment methods. Includes linked auto-payments. */
   const accRows = db.prepare(`SELECT payment_method,
     COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income') THEN amount ELSE 0 END),0) tin,
     COALESCE(SUM(CASE WHEN type IN ('purchase','expense','payment_out') THEN amount ELSE 0 END),0) tout
-    FROM transactions WHERE business_id=? GROUP BY payment_method`).all(b);
+    FROM transactions WHERE business_id=? AND payment_method != '' GROUP BY payment_method`).all(b);
   const cashBank = accRows.reduce((s, r) => s + r.tin - r.tout, 0);
   const cashHand = accRows.filter(r => String(r.payment_method || '').toLowerCase() === 'cash').reduce((s, r) => s + r.tin - r.tout, 0);
 
@@ -292,7 +294,7 @@ app.get('/api/summary', auth(), (req, res) => {
     cashflowWeekly.push({ label: w === 0 ? 'This wk' : (w + 'w ago'), inflow: row.inflow, outflow: row.outflow });
   }
 
-  res.json({ today: todayTotals, todayCounts: tCounts, totalReceivable: recv, totalPayable: pay, recent, lowStock, monthly, cashBank, cashHand, bsMonth: bs.name, bsSale: bsTotals.sale, bsPurchase: bsTotals.purchase, bsExpense: bsTotals.expense, cashflow, cashflowWeekly });
+  res.json({ today: todayTotals, todayCounts: tCounts, totalReceivable: recv, totalReceivableDue: recvDue, totalPayable: pay, totalPayableDue: payDue, recent, lowStock, monthly, cashBank, cashHand, bsMonth: bs.name, bsSale: bsTotals.sale, bsPurchase: bsTotals.purchase, bsExpense: bsTotals.expense, cashflow, cashflowWeekly });
 });
 
 /* ---------------- Parties ---------------- */
@@ -359,7 +361,10 @@ app.get('/api/parties/:id/ledger', auth(), (req, res) => {
     const effect = balEffect(r.type);
     const delta = effect === 'add' ? r.amount : (effect === 'sub' ? -r.amount : 0);
     running = Math.round((running + delta) * 100) / 100;
-    return { ...r, delta, balance: running };
+    const dueAmt = r.due_amount || 0;
+    const paidAmt = r.paid_amount || 0;
+    const payStatus = r.payment_status || 'paid';
+    return { ...r, delta, balance: running, due_amount: dueAmt, paid_amount: paidAmt, payment_status: payStatus };
   });
   res.json({ party: p, lines, closing: running });
 });
@@ -425,22 +430,29 @@ function adjustStock(itemId, delta) {
 }
 
 app.post('/api/transactions', auth(), (req, res) => {
-  const { type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note } = req.body;
+  const { type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note, paid_amount, paid_via } = req.body;
   if (!TXN_TYPES.includes(type)) return bad('Invalid transaction type')(res);
   const d = date || new Date().toISOString().slice(0, 10);
   const amt = Number(amount) || 0;
   if (amt <= 0) return bad('Amount must be greater than zero')(res);
 
+  const isPaymentLinked = ['sale', 'purchase'].includes(type);
+  const paid = isPaymentLinked ? Math.min(Number(paid_amount) || 0, amt) : amt;
+  const due = isPaymentLinked ? Math.max(0, Math.round((amt - paid) * 100) / 100) : 0;
+  const status = !isPaymentLinked ? 'paid' : (due <= 0 ? 'paid' : 'partial');
+  const method = payment_method || '';
+
   const txn = {
     type, date: d, party_id: party_id || null, item_id: item_id || null,
     quantity: Number(quantity) || 0, rate: Number(rate) || 0, amount: amt,
     discount: Number(discount) || 0, vat_percent: Number(vat_percent) || 0,
-    reminder_date: reminder_date || '', payment_method: payment_method || '', note: note || '',
+    reminder_date: reminder_date || '', payment_method: method, note: note || '',
+    paid_amount: paid, due_amount: due, payment_status: status,
   };
   begin();
   try {
-    const r = db.prepare(`INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(req.business.id, txn.type, txn.date, txn.party_id, txn.item_id, txn.quantity, txn.rate, txn.amount, txn.discount, txn.vat_percent, txn.reminder_date, txn.payment_method, txn.note);
+    const r = db.prepare(`INSERT INTO transactions (business_id, type, date, party_id, item_id, quantity, rate, amount, discount, vat_percent, reminder_date, payment_method, note, paid_amount, due_amount, payment_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(req.business.id, txn.type, txn.date, txn.party_id, txn.item_id, txn.quantity, txn.rate, txn.amount, txn.discount, txn.vat_percent, txn.reminder_date, txn.payment_method, txn.note, txn.paid_amount, txn.due_amount, txn.payment_status);
     const prefix = (req.business.invoice_prefix || 'INV').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'INV';
     const refNo = prefix + '-' + String(r.lastInsertRowid).padStart(6, '0');
     db.prepare('UPDATE transactions SET ref_no=? WHERE id=?').run(refNo, r.lastInsertRowid);
@@ -448,8 +460,20 @@ app.post('/api/transactions', auth(), (req, res) => {
       const m = stockMult(type);
       if (m) adjustStock(txn.item_id, m * txn.quantity);
     }
+
+    /* Auto-create linked payment_in/payment_out for the paid portion of sales/purchases. */
+    let linkedPaymentId = null;
+    if (isPaymentLinked && paid > 0) {
+      const payType = type === 'sale' ? 'payment_in' : 'payment_out';
+      const payMethod = paid_via || method || '';
+      const payRef = refNo + '-PAID';
+      const pr = db.prepare(`INSERT INTO transactions (business_id, type, date, party_id, amount, payment_method, note, ref_no, paid_amount, due_amount, payment_status, linked_txn_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(req.business.id, payType, d, txn.party_id, paid, payMethod, 'Auto: payment for ' + refNo, payRef, paid, 0, 'paid', r.lastInsertRowid);
+      linkedPaymentId = pr.lastInsertRowid;
+    }
+
     commit();
-    res.json({ ok: true, id: r.lastInsertRowid, ref_no: refNo });
+    res.json({ ok: true, id: r.lastInsertRowid, ref_no: refNo, linked_payment_id: linkedPaymentId });
   } catch (e) {
     rollback();
     bad('Failed to save transaction')(res);
@@ -483,6 +507,11 @@ app.put('/api/transactions/:id', auth(), (req, res) => {
   const amt = Number(req.body.amount ?? old.amount) || 0;
   const quantity = Number(req.body.quantity ?? old.quantity) || 0;
 
+  const isPaymentLinked = ['sale', 'purchase'].includes(type);
+  const paid = isPaymentLinked ? Math.min(Number(req.body.paid_amount ?? old.paid_amount) || 0, amt) : amt;
+  const due = isPaymentLinked ? Math.max(0, Math.round((amt - paid) * 100) / 100) : 0;
+  const status = !isPaymentLinked ? 'paid' : (due <= 0 ? 'paid' : 'partial');
+
   // revert old stock effect, then apply new one
   const revert = (t) => {
     if (!t.item_id) return;
@@ -511,10 +540,34 @@ app.put('/api/transactions/:id', auth(), (req, res) => {
       reminder_date: req.body.reminder_date ?? old.reminder_date,
       payment_method: req.body.payment_method ?? old.payment_method,
       note: req.body.note ?? old.note,
+      paid_amount: paid,
+      due_amount: due,
+      payment_status: status,
     };
     apply(next);
-    db.prepare('UPDATE transactions SET type=?, date=?, party_id=?, item_id=?, quantity=?, rate=?, amount=?, discount=?, vat_percent=?, reminder_date=?, payment_method=?, note=? WHERE id=?')
-      .run(next.type, next.date, next.party_id, next.item_id, next.quantity, next.rate, next.amount, next.discount, next.vat_percent, next.reminder_date, next.payment_method, next.note, old.id);
+    db.prepare('UPDATE transactions SET type=?, date=?, party_id=?, item_id=?, quantity=?, rate=?, amount=?, discount=?, vat_percent=?, reminder_date=?, payment_method=?, note=?, paid_amount=?, due_amount=?, payment_status=? WHERE id=?')
+      .run(next.type, next.date, next.party_id, next.item_id, next.quantity, next.rate, next.amount, next.discount, next.vat_percent, next.reminder_date, next.payment_method, next.note, next.paid_amount, next.due_amount, next.payment_status, old.id);
+
+    /* Update or create linked payment transaction. */
+    if (isPaymentLinked) {
+      const existingPay = db.prepare('SELECT * FROM transactions WHERE linked_txn_id=? AND type IN (?,?) LIMIT 1').get(old.id, 'payment_in', 'payment_out');
+      if (paid > 0) {
+        const payType = type === 'sale' ? 'payment_in' : 'payment_out';
+        const payMethod = req.body.paid_via || next.payment_method || '';
+        if (existingPay) {
+          db.prepare('UPDATE transactions SET amount=?, payment_method=?, date=? WHERE id=?').run(paid, payMethod, next.date, existingPay.id);
+        } else {
+          const prefix = (req.business.invoice_prefix || 'INV').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'INV';
+          const refNo = next.note || (prefix + '-' + String(old.id).padStart(6, '0'));
+          db.prepare(`INSERT INTO transactions (business_id, type, date, party_id, amount, payment_method, note, ref_no, paid_amount, due_amount, payment_status, linked_txn_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(req.business.id, payType, next.date, next.party_id, paid, payMethod, 'Auto: payment for ' + refNo, refNo + '-PAID', paid, 0, 'paid', old.id);
+        }
+      } else if (existingPay) {
+        if (existingPay.item_id) { const m = stockMult(existingPay.type); if (m) adjustStock(existingPay.item_id, -m * existingPay.quantity); }
+        db.prepare('DELETE FROM transactions WHERE id=?').run(existingPay.id);
+      }
+    }
+
     commit();
     res.json({ ok: true });
   } catch (e) {
@@ -528,7 +581,10 @@ app.get('/api/transactions/:id', auth(), (req, res) => {
     LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
     WHERE t.id=? AND t.business_id=?`).get(req.params.id, req.business.id);
   if (!t) return bad('Transaction not found')(res);
-  res.json({ transaction: t, business: getBusiness(req.business.id) });
+  const linkedPayments = db.prepare(`SELECT t.*, p.name party_name FROM transactions t
+    LEFT JOIN parties p ON p.id=t.party_id WHERE t.linked_txn_id=? ORDER BY t.date ASC`).all(req.params.id);
+  const linkedTo = t.linked_txn_id ? db.prepare(`SELECT t.id, t.ref_no, t.amount, t.paid_amount, t.due_amount, t.payment_status FROM transactions t WHERE t.id=?`).get(t.linked_txn_id) : null;
+  res.json({ transaction: t, business: getBusiness(req.business.id), linkedPayments, linkedTo });
 });
 
 app.delete('/api/transactions/:id', auth(), (req, res) => {
@@ -539,6 +595,22 @@ app.delete('/api/transactions/:id', auth(), (req, res) => {
     if (old.item_id) {
       const m = stockMult(old.type);
       if (m) adjustStock(old.item_id, -m * old.quantity);
+    }
+    /* Delete linked payment_in/payment_out if this was a sale/purchase. */
+    const linkedPay = db.prepare('SELECT * FROM transactions WHERE linked_txn_id=?').all(old.id);
+    for (const lp of linkedPay) {
+      if (lp.item_id) { const m = stockMult(lp.type); if (m) adjustStock(lp.item_id, -m * lp.quantity); }
+      db.prepare('DELETE FROM transactions WHERE id=?').run(lp.id);
+    }
+    /* If this was a payment linked to a sale/purchase, update the parent's due. */
+    if (old.linked_txn_id) {
+      const parent = db.prepare('SELECT * FROM transactions WHERE id=?').get(old.linked_txn_id);
+      if (parent) {
+        const newPaid = Math.max(0, (parent.paid_amount || 0) - old.amount);
+        const newDue = Math.max(0, Math.round((parent.amount - newPaid) * 100) / 100);
+        const newStatus = newDue <= 0 ? 'paid' : 'partial';
+        db.prepare('UPDATE transactions SET paid_amount=?, due_amount=?, payment_status=? WHERE id=?').run(newPaid, newDue, newStatus, parent.id);
+      }
     }
     db.prepare('DELETE FROM transactions WHERE id=?').run(old.id);
     commit();
@@ -618,8 +690,20 @@ app.get('/api/report/:slug', auth(), (req, res) => {
       const d = rows(allTypes);
       return res.json({ ...d.sums, rows: d.rows });
     }
-    case 'sales': { const d = rows(['sale']); return res.json({ ...d.sums, rows: d.rows }); }
-    case 'purchase': { const d = rows(['purchase']); return res.json({ ...d.sums, rows: d.rows }); }
+    case 'sales': {
+      const d = rows(['sale']);
+      const saleRows = d.rows.map(r => ({ ...r, paid_amount: r.paid_amount || 0, due_amount: r.due_amount || 0, payment_status: r.payment_status || 'paid' }));
+      const totalDue = saleRows.reduce((s, r) => s + (r.due_amount || 0), 0);
+      const totalPaid = saleRows.reduce((s, r) => s + (r.paid_amount || 0), 0);
+      return res.json({ ...d.sums, rows: saleRows, totalDue, totalPaid });
+    }
+    case 'purchase': {
+      const d = rows(['purchase']);
+      const purchaseRows = d.rows.map(r => ({ ...r, paid_amount: r.paid_amount || 0, due_amount: r.due_amount || 0, payment_status: r.payment_status || 'paid' }));
+      const totalDue = purchaseRows.reduce((s, r) => s + (r.due_amount || 0), 0);
+      const totalPaid = purchaseRows.reduce((s, r) => s + (r.paid_amount || 0), 0);
+      return res.json({ ...d.sums, rows: purchaseRows, totalDue, totalPaid });
+    }
     case 'sales_return': { const d = rows(['sales_return']); return res.json({ ...d.sums, rows: d.rows }); }
     case 'purchase_return': { const d = rows(['purchase_return']); return res.json({ ...d.sums, rows: d.rows }); }
     case 'cash': {
@@ -648,7 +732,9 @@ app.get('/api/report/:slug', auth(), (req, res) => {
           COALESCE(SUM(CASE WHEN t.type='payment_in' THEN t.amount ELSE 0 END),0) received,
           COALESCE(SUM(CASE WHEN t.type='payment_out' THEN t.amount ELSE 0 END),0) paid
         FROM transactions t WHERE ${tWhere.join(' AND ')}`).get(...tP);
-      return res.json(row);
+      const saleDue = db.prepare(`SELECT COALESCE(SUM(t.due_amount),0) v FROM transactions t WHERE ${[...tWhere, "t.type='sale'", 't.due_amount > 0'].join(' AND ')}`).get(...tP).v;
+      const purchaseDue = db.prepare(`SELECT COALESCE(SUM(t.due_amount),0) v FROM transactions t WHERE ${[...tWhere, "t.type='purchase'", 't.due_amount > 0'].join(' AND ')}`).get(...tP).v;
+      return res.json({ ...row, saleDue, purchaseDue });
     }
     case 'expense_category':
     case 'income_category': {
@@ -663,14 +749,17 @@ app.get('/api/report/:slug', auth(), (req, res) => {
       const parties = db.prepare('SELECT * FROM parties WHERE business_id=? ORDER BY name COLLATE NOCASE').all(bid).map(p => {
         const t = db.prepare(`SELECT COALESCE(SUM(CASE WHEN type IN ('sale','purchase') THEN amount WHEN type IN ('payment_in','payment_out','sales_return','purchase_return') THEN -amount ELSE 0 END),0) v FROM transactions WHERE business_id=? AND party_id=?`).get(bid, p.id).v;
         const balance = Math.round((p.opening_balance + t) * 100) / 100;
-        return { ...p, balance };
+        const due = db.prepare(`SELECT COALESCE(SUM(t.due_amount),0) v FROM transactions t WHERE t.business_id=? AND t.party_id=? AND t.due_amount > 0 AND t.type IN ('sale','purchase')`).get(bid, p.id).v;
+        return { ...p, balance, due_amount: due };
       });
       const customers = parties.filter(p => p.type === 'customer');
       const suppliers = parties.filter(p => p.type === 'supplier');
       return res.json({
         customers, suppliers,
         receivable: customers.reduce((s, p) => s + Math.max(p.balance, 0), 0),
+        receivableDue: customers.reduce((s, p) => s + (p.due_amount || 0), 0),
         payable: suppliers.reduce((s, p) => s + Math.max(p.balance, 0), 0),
+        payableDue: suppliers.reduce((s, p) => s + (p.due_amount || 0), 0),
       });
     }
     case 'item_list': {
@@ -733,9 +822,10 @@ app.get('/api/report/:slug', auth(), (req, res) => {
         const eff = balEffect(r.type);
         const delta = eff === 'add' ? r.amount : (eff === 'sub' ? -r.amount : 0);
         running = Math.round((running + delta) * 100) / 100;
-        return { ...r, delta, balance: running };
+        return { ...r, delta, balance: running, paid_amount: r.paid_amount || 0, due_amount: r.due_amount || 0, payment_status: r.payment_status || 'paid' };
       });
-      return res.json({ party, rows: lines, opening, closing: running });
+      const totalDue = lines.filter(r => r.due_amount > 0).reduce((s, r) => s + r.due_amount, 0);
+      return res.json({ party, rows: lines, opening, closing: running, totalDue });
     }
     case 'item_details': {
       const iid = Number(item_id);
@@ -758,6 +848,24 @@ app.get('/api/report/:slug', auth(), (req, res) => {
           COALESCE(SUM(CASE WHEN t.type IN ('purchase','payment_out','expense','sales_return') THEN t.amount ELSE 0 END),0) outflow
         FROM transactions t WHERE t.business_id=? AND t.date=?`).get(bid, d);
       return res.json({ date: d, rows, inflow: total.inflow, outflow: total.outflow });
+    }
+    case 'overdue_sales': {
+      const w = [...tWhere, "t.type='sale'", 't.due_amount > 0'];
+      const p = [...tP];
+      const saleRows = db.prepare(`SELECT t.*, p.name party_name, i.name item_name, i.unit item_unit
+        FROM transactions t LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+        WHERE ${w.join(' AND ')} ORDER BY t.date ASC, t.id ASC`).all(...p);
+      const totalDue = saleRows.reduce((s, r) => s + (r.due_amount || 0), 0);
+      return res.json({ rows: saleRows, totalDue, count: saleRows.length });
+    }
+    case 'overdue_purchases': {
+      const w = [...tWhere, "t.type='purchase'", 't.due_amount > 0'];
+      const p = [...tP];
+      const purchaseRows = db.prepare(`SELECT t.*, p.name party_name, i.name item_name, i.unit item_unit
+        FROM transactions t LEFT JOIN parties p ON p.id=t.party_id LEFT JOIN items i ON i.id=t.item_id
+        WHERE ${w.join(' AND ')} ORDER BY t.date ASC, t.id ASC`).all(...p);
+      const totalDue = purchaseRows.reduce((s, r) => s + (r.due_amount || 0), 0);
+      return res.json({ rows: purchaseRows, totalDue, count: purchaseRows.length });
     }
     default:
       return bad('Unknown report')(res);
@@ -899,7 +1007,7 @@ app.get('/api/accounts', auth(), (req, res) => {
   const rows = db.prepare(`SELECT payment_method,
     COALESCE(SUM(CASE WHEN type IN ('sale','payment_in','other_income') THEN amount ELSE 0 END),0) tin,
     COALESCE(SUM(CASE WHEN type IN ('purchase','expense','payment_out') THEN amount ELSE 0 END),0) tout
-    FROM transactions WHERE business_id=? GROUP BY payment_method`).all(b);  const sums = {};
+    FROM transactions WHERE business_id=? AND payment_method != '' GROUP BY payment_method`).all(b);  const sums = {};
   rows.forEach(r => { if (r.payment_method) sums[r.payment_method] = r; });
   const accounts = db.prepare('SELECT * FROM accounts WHERE business_id=? ORDER BY name COLLATE NOCASE').all(b);
   const seen = {};
@@ -915,6 +1023,13 @@ app.get('/api/accounts', auth(), (req, res) => {
       out.push({ id: null, name: n, type: 'other', in: sums[n].tin, out: sums[n].tout, balance: Math.round((sums[n].tin - sums[n].tout) * 100) / 100 });
     }
   });
+  /* Add a "Cash" aggregate if not already present. */
+  const cashIn = db.prepare(`SELECT COALESCE(SUM(amount),0) v FROM transactions WHERE business_id=? AND type IN ('sale','payment_in','other_income') AND (payment_method='' OR payment_method IS NULL)`).get(b).v;
+  const cashOut = db.prepare(`SELECT COALESCE(SUM(amount),0) v FROM transactions WHERE business_id=? AND type IN ('purchase','expense','payment_out') AND (payment_method='' OR payment_method IS NULL)`).get(b).v;
+  const cashBal = Math.round((cashIn - cashOut) * 100) / 100;
+  if (!seen['cash'] && cashBal !== 0) {
+    out.unshift({ id: null, name: 'Cash', type: 'cash', in: cashIn, out: cashOut, balance: cashBal });
+  }
   res.json({ accounts: out });
 });
 

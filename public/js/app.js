@@ -350,11 +350,13 @@ async function renderDashboard() {
         <div class="bl">To Receive</div>
         <div class="bv pos">${rs(d.totalReceivable)}</div>
         <div class="bn">What customers owe you</div>
+        ${d.totalReceivableDue > 0 ? `<div class="bn" style="color:var(--danger);font-weight:700;margin-top:4px">Outstanding Due: ${rs(d.totalReceivableDue)}</div>` : ''}
       </div>
       <div class="bal-card pay">
         <div class="bl">To Give</div>
         <div class="bv neg">${rs(d.totalPayable)}</div>
         <div class="bn">What you owe suppliers</div>
+        ${d.totalPayableDue > 0 ? `<div class="bn" style="color:var(--danger);font-weight:700;margin-top:4px">Outstanding Due: ${rs(d.totalPayableDue)}</div>` : ''}
       </div>
       <div class="bal-card total">
         <div class="bl">Total Balance (Cash & Bank)</div>
@@ -503,12 +505,20 @@ function pageTxn(p) { state.txnPage = p; route(); }
 function txnModal(txn) {
   const editing = !!txn && !!txn.id;
   const defType = txn ? txn.type : 'sale';
+  const isPaymentLinked = ['sale', 'purchase'].includes(defType);
   const customers = state.parties.filter(p => p.type === 'customer');
   const suppliers = state.parties.filter(p => p.type === 'supplier');
-  const partyOpts = (list, sel) => `<option value="">— Select —</option>` + list.map(p => `<option value="${p.id}" ${Number(sel) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+  const partyOpts = (list, sel, includeCash) => {
+    let opts = includeCash ? `<option value="">— Cash (no party) —</option>` : `<option value="">— Select —</option>`;
+    return opts + list.map(p => `<option value="${p.id}" ${Number(sel) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+  };
   const itemOpts = `<option value="">— None —</option>` + state.items.map(i => `<option value="${i.id}" ${Number(txn && txn.item_id) === i.id ? 'selected' : ''}>${esc(i.name)} (${fmt(i.stock)} ${i.unit} in stock)</option>`).join('');
   const types = [['sale', 'Sale (khata baki)'], ['sales_return', 'Sales return'], ['purchase', 'Purchase'], ['purchase_return', 'Purchase return'], ['expense', 'Expense'], ['other_income', 'Other Income'], ['payment_in', 'Payment received'], ['payment_out', 'Payment made'], ['quotation', 'Quotation']];
   const noItemTypes = ['expense', 'other_income', 'payment_in', 'payment_out'];
+  const paymentMethods = ['', 'Bank', 'Khalti', 'eSewa', 'Mobile Banking', 'Cheque'];
+
+  const existingPaid = editing ? (txn.paid_amount || 0) : (isPaymentLinked ? (Number(txn && txn.amount) || 0) : 0);
+  const existingPaidVia = editing ? (txn.payment_method || '') : (txn ? txn.payment_method || '' : '');
 
   let partyFieldHtml;
   if (defType === 'expense') {
@@ -516,12 +526,23 @@ function txnModal(txn) {
   } else if (defType === 'other_income') {
     partyFieldHtml = `<div class="field"><label>Income category</label><input class="input" id="f_party" list="incCat" placeholder="e.g. Interest, Commission..." value="${esc(txn && txn.note || '')}"/><datalist id="incCat">${['Interest', 'Commission', 'Rent received', 'Discount received', 'Sale of assets', 'Other'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
   } else if (defType === 'purchase' || defType === 'payment_out' || defType === 'purchase_return') {
-    partyFieldHtml = `<div class="field"><label>Supplier</label><select class="select" id="f_party">${partyOpts(suppliers, txn && txn.party_id)}</select></div>`;
+    partyFieldHtml = `<div class="field"><label>Supplier (optional)</label><select class="select" id="f_party">${partyOpts(suppliers, txn && txn.party_id, true)}</select></div>`;
   } else {
-    partyFieldHtml = `<div class="field"><label>Customer</label><select class="select" id="f_party">${partyOpts(customers, txn && txn.party_id)}</select></div>`;
+    partyFieldHtml = `<div class="field"><label>Customer</label><select class="select" id="f_party">${partyOpts(customers, txn && txn.party_id, false)}</select></div>`;
   }
 
   const rateHint = (txn && txn.rate) ? ` · rate ${rs(txn.rate)}` : '';
+  const paidDueRow = isPaymentLinked ? `
+    <div id="paidDueSection">
+      <div class="row">
+        <div class="field" style="flex:1"><label>Amount Paid (Rs.)</label><input class="input" id="f_paid" type="number" min="0" step="any" value="${existingPaid}" oninput="calcDue()"/></div>
+        <div class="field" style="flex:1"><label>Paid Via</label>
+          <select class="select" id="f_paidvia">${paymentMethods.map(m => `<option value="${m}" ${existingPaidVia === m ? 'selected' : ''}>${m || 'Cash'}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="jfoot" style="margin-top:0"><span>Total: <b id="dueTotal">—</b></span><span>Paid: <b id="duePaid">—</b></span><span style="color:var(--danger)">Due: <b id="dueBalance">—</b></span></div>
+    </div>` : '';
+
   const wrap = openModal(editing ? 'Edit transaction' : 'Add transaction', `
     ${txn && txn.ref_no ? `<div class="field"><label>Reference no.</label><input class="input" value="${esc(txn.ref_no)}" disabled/></div>` : ''}
     <div class="field"><label>Transaction type</label>
@@ -531,16 +552,17 @@ function txnModal(txn) {
     <div id="itemField" class="${noItemTypes.includes(defType) ? 'hidden' : ''}">
       <div class="field"><label>Item</label><select class="select" id="f_item">${itemOpts}</select></div>
       <div class="row">
-        <div class="field" style="flex:1"><label>Quantity</label><input class="input" id="f_qty" type="number" min="0" step="any" value="${txn && txn.quantity ? txn.quantity : 1}" oninput="calcAmt()"/></div>
-        <div class="field" style="flex:1"><label>Rate${txn && txn.rate ? rateHint : ''}</label><input class="input" id="f_rate" type="number" min="0" step="any" value="${txn && txn.rate ? txn.rate : ''}" oninput="calcAmt()"/></div>
+        <div class="field" style="flex:1"><label>Quantity</label><input class="input" id="f_qty" type="number" min="0" step="any" value="${txn && txn.quantity ? txn.quantity : 1}" oninput="${editing ? '' : 'calcAmt()'}"/></div>
+        <div class="field" style="flex:1"><label>Rate${txn && txn.rate ? rateHint : ''}</label><input class="input" id="f_rate" type="number" min="0" step="any" value="${txn && txn.rate ? txn.rate : ''}" oninput="${editing ? '' : 'calcAmt()'}"/></div>
       </div>
       <div class="hint" id="priceHint" style="color:var(--text-tertiary);font-size:12px;margin-bottom:10px"></div>
     </div>
-    <div class="field"><label>Amount (Rs.)</label><input class="input" id="f_amount" type="number" min="0" step="any" value="${txn ? txn.amount : ''}" oninput="manualAmt()"/></div>
+    <div class="field"><label>Amount (Rs.)</label><input class="input" id="f_amount" type="number" min="0" step="any" value="${txn ? txn.amount : ''}" oninput="${editing ? 'calcDue()' : 'calcAmt(); calcDue()'}"/></div>
     <div id="discVatRow" class="row ${noItemTypes.includes(defType) ? 'hidden' : ''}">
       <div class="field" style="flex:1"><label>Discount (Rs.)</label><input class="input" id="f_discount" type="number" min="0" step="any" value="${txn && txn.discount ? txn.discount : 0}"/></div>
       <div class="field" style="flex:1"><label>VAT (%)</label><input class="input" id="f_vat" type="number" min="0" step="any" value="${txn && txn.vat_percent ? txn.vat_percent : 0}"/></div>
     </div>
+    ${paidDueRow}
     <div class="row">
       <div class="field" style="flex:1"><label>Date</label><input class="input" id="f_date" type="date" value="${txn ? txn.date : today()}"/></div>
       <div class="field" style="flex:1"><label>Payment method</label>
@@ -559,14 +581,36 @@ function txnModal(txn) {
     const itemField = wrap.querySelector('#itemField');
     itemField.classList.toggle('hidden', noItemTypes.includes(t));
     wrap.querySelector('#discVatRow').classList.toggle('hidden', noItemTypes.includes(t));
+    const nowPaymentLinked = ['sale', 'purchase'].includes(t);
+    const paidSection = wrap.querySelector('#paidDueSection');
+    if (nowPaymentLinked && !paidSection) {
+      const amtEl = wrap.querySelector('#f_amount');
+      const afterAmt = amtEl ? amtEl.parentElement : wrap.querySelector('#discVatRow');
+      if (afterAmt) {
+        const div = document.createElement('div');
+        div.id = 'paidDueSection';
+        div.innerHTML = `
+          <div class="row">
+            <div class="field" style="flex:1"><label>Amount Paid (Rs.)</label><input class="input" id="f_paid" type="number" min="0" step="any" value="${amtEl ? amtEl.value : 0}" oninput="calcDue()"/></div>
+            <div class="field" style="flex:1"><label>Paid Via</label>
+              <select class="select" id="f_paidvia">${paymentMethods.map(m => `<option value="${m}">${m || 'Cash'}</option>`).join('')}</select>
+            </div>
+          </div>
+          <div class="jfoot" style="margin-top:0"><span>Total: <b id="dueTotal">—</b></span><span>Paid: <b id="duePaid">—</b></span><span style="color:var(--danger)">Due: <b id="dueBalance">—</b></span></div>`;
+        afterAmt.insertAdjacentElement('afterend', div);
+        calcDue();
+      }
+    } else if (!nowPaymentLinked && paidSection) {
+      paidSection.remove();
+    }
     if (t === 'expense') {
       partyField.innerHTML = `<div class="field"><label>Expense category</label><input class="input" id="f_party" list="expCat" placeholder="e.g. Rent, Salary..." value="${esc(txn && txn.note || '')}"/><datalist id="expCat">${['Rent', 'Salary', 'Electricity', 'Transport', 'Utilities', 'Tea & snacks', 'Maintenance'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
     } else if (t === 'other_income') {
       partyField.innerHTML = `<div class="field"><label>Income category</label><input class="input" id="f_party" list="incCat" placeholder="e.g. Interest, Commission..." value="${esc(txn && txn.note || '')}"/><datalist id="incCat">${['Interest', 'Commission', 'Rent received', 'Discount received', 'Sale of assets', 'Other'].map(x => `<option value="${x}">`).join('')}</datalist></div>`;
     } else if (t === 'purchase' || t === 'payment_out' || t === 'purchase_return') {
-      partyField.innerHTML = `<div class="field"><label>Supplier</label><select class="select" id="f_party">${partyOpts(suppliers, txn && txn.party_id)}</select></div>`;
+      partyField.innerHTML = `<div class="field"><label>Supplier (optional)</label><select class="select" id="f_party">${partyOpts(suppliers, txn && txn.party_id, true)}</select></div>`;
     } else {
-      partyField.innerHTML = `<div class="field"><label>Customer</label><select class="select" id="f_party">${partyOpts(customers, txn && txn.party_id)}</select></div>`;
+      partyField.innerHTML = `<div class="field"><label>Customer</label><select class="select" id="f_party">${partyOpts(customers, txn && txn.party_id, false)}</select></div>`;
     }
   });
 
@@ -590,8 +634,15 @@ function txnModal(txn) {
     body.item_id = itemEl ? Number(itemEl.value) || null : null;
     body.quantity = Number((wrap.querySelector('#f_qty') || {}).value) || 0;
     body.rate = Number((wrap.querySelector('#f_rate') || {}).value) || 0;
-    if (!['expense', 'other_income'].includes(body.type) && body.party_id == null && body.item_id == null) return toast('Select a party or an item', 'error');
+    if (['sale', 'purchase'].includes(body.type) && body.party_id == null && body.item_id == null) return toast('Select a party or an item', 'error');
+    if (!['sale', 'purchase'].includes(body.type) && !['expense', 'other_income'].includes(body.type) && body.party_id == null && body.item_id == null) return toast('Select a party or an item', 'error');
     if (body.amount <= 0) return toast('Amount must be greater than zero', 'error');
+    if (['sale', 'purchase'].includes(body.type)) {
+      const paidEl = wrap.querySelector('#f_paid');
+      body.paid_amount = Number(paidEl ? paidEl.value : 0) || 0;
+      body.paid_via = (wrap.querySelector('#f_paidvia') || {}).value || '';
+      if (body.paid_amount > body.amount) body.paid_amount = body.amount;
+    }
     try {
       if (editing) await api('/transactions/' + txn.id, { method: 'PUT', body });
       else await api('/transactions', { method: 'POST', body });
@@ -611,7 +662,7 @@ function txnModal(txn) {
       if (it && hint) {
         hint.textContent = `Buy ${rs(it.purchase_price)} · Sell ${rs(it.sale_price)} · Wholesale ${rs(it.wholesale_price)} · MRP ${rs(it.mrp)} · ${fmt(it.stock)} ${it.unit} in stock`;
         const rateEl = wrap.querySelector('#f_rate');
-        if (rateEl && !Number(rateEl.value)) {
+        if (rateEl && !editing && !Number(rateEl.value)) {
           const suggested = typeNow === 'purchase' ? (it.wholesale_price || it.purchase_price) : (it.wholesale_price || it.sale_price);
           rateEl.value = suggested || '';
           calcAmt();
@@ -619,12 +670,30 @@ function txnModal(txn) {
       } else if (hint) hint.textContent = '';
     });
   }
+
+  calcDue();
 }
-window.calcAmt = () => {
-  const q = document.getElementById('f_qty'), r = document.getElementById('f_rate'), a = document.getElementById('f_amount');
-  if (q && r && a) a.value = (Number(q.value) || 0) * (Number(r.value) || 0);
+  window.calcAmt = () => {
+    const q = document.getElementById('f_qty'), r = document.getElementById('f_rate'), a = document.getElementById('f_amount');
+    if (q && r && a) a.value = (Number(q.value) || 0) * (Number(r.value) || 0);
+    calcDue();
+  };
+window.calcDue = () => {
+  const a = document.getElementById('f_amount');
+  const p = document.getElementById('f_paid');
+  const t = document.getElementById('dueTotal');
+  const pd = document.getElementById('duePaid');
+  const db2 = document.getElementById('dueBalance');
+  if (!a || !p || !t || !pd || !db2) return;
+  const amt = Number(a.value) || 0;
+  const paid = Math.min(Number(p.value) || 0, amt);
+  p.value = paid;
+  const due = Math.max(0, Math.round((amt - paid) * 100) / 100);
+  t.textContent = rs(amt);
+  pd.textContent = rs(paid);
+  db2.textContent = rs(due);
 };
-window.manualAmt = () => { /* allow manual override */ };
+window.manualAmt = () => { calcDue(); };
 
 function addTxn() { txnModal(null); }
 function addTxnOfType(type) { txnModal({ type: type }); }
@@ -646,11 +715,19 @@ async function viewInvoice(id) {
   const d = await api('/transactions/' + id);
   const t = d.transaction;
   const b = d.business;
+  const linkedPayments = d.linkedPayments || [];
   const lines = [];
   if (t.item_name) lines.push([t.item_name, fmt(t.quantity) + ' ' + t.item_unit, rs(t.rate), rs(t.amount)]);
   else if (t.party_name) lines.push([(t.note || 'Khata entry'), '', '', rs(t.amount)]);
   else lines.push([t.note || 'Entry', '', '', rs(t.amount)]);
   const subtotal = Number(t.amount) + Number(t.discount);
+  const isPartial = ['sale', 'purchase'].includes(t.type);
+  const paidAmt = isPartial ? (t.paid_amount || 0) : 0;
+  const dueAmt = isPartial ? (t.due_amount || 0) : 0;
+  const payStatus = t.payment_status || 'paid';
+  const statusColors = { paid: '#22a06b', partial: '#e8a13c', overdue: '#e5484d' };
+  const statusLabels = { paid: 'Paid', partial: 'Partial', overdue: 'Overdue' };
+  const paymentRows = linkedPayments.map(p => `<div style="display:flex;justify-content:space-between;font-size:12px"><span>Payment: ${prettyDate(p.date)} via ${esc(p.payment_method || 'Cash')}</span><span>- ${rs(p.amount)}</span></div>`).join('');
   const wrap = openModal('Invoice ' + esc(t.ref_no || ''), `
     <div id="invoicePrint" style="max-width:380px;margin:0 auto;padding:10px;font-size:14px;color:#000">
       <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:10px">
@@ -670,12 +747,18 @@ async function viewInvoice(id) {
       <div style="margin-top:8px;font-size:12px">
         <div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${rs(subtotal)}</span></div>
         ${t.discount ? `<div style="display:flex;justify-content:space-between"><span>Discount</span><span>- ${rs(t.discount)}</span></div>` : ''}
-        ${t.vat_percent ? `<div style="display:flex;justify-content:space-between"><span>VAT ${fmt(t.vat_percent)}%</span><span>${rs(t.amount * t.vat_percent / 100)}</span></div>` : ''}
+        ${t.vat_percent ? `<div style="display:flex;justify-content:space-between"><span>VAT ${fmt(t.vat_percent)}%</span><span>Incl.</span></div>` : ''}
         <div style="display:flex;justify-content:space-between;font-weight:800;font-size:14px;border-top:1px solid #000;margin-top:4px;padding-top:4px"><span>Total</span><span>${rs(t.amount)}</span></div>
+        ${isPartial ? `
+        <div style="display:flex;justify-content:space-between;color:#22a06b;margin-top:4px"><span>Paid</span><span>${rs(paidAmt)}</span></div>
+        ${dueAmt > 0 ? `<div style="display:flex;justify-content:space-between;color:#e5484d;font-weight:700;margin-top:2px"><span>Balance Due</span><span>${rs(dueAmt)}</span></div>` : ''}
+        <div style="text-align:right;margin-top:4px"><span style="background:${statusColors[payStatus] || '#22a06b'};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">${statusLabels[payStatus] || payStatus}</span></div>
+        ` : ''}
         ${t.payment_method ? `<div style="display:flex;justify-content:space-between"><span>Payment</span><span>${esc(t.payment_method)}</span></div>` : ''}
         ${t.reminder_date ? `<div style="display:flex;justify-content:space-between"><span>Due date</span><span>${prettyDate(t.reminder_date)}</span></div>` : ''}
+        ${paymentRows ? `<div style="margin-top:6px;border-top:1px dashed #ccc;padding-top:6px"><div style="font-weight:700;margin-bottom:4px">Payments:</div>${paymentRows}</div>` : ''}
       </div>
-      ${t.note ? `<div style="font-size:11px;margin-top:8px">Note: ${esc(t.note)}</div>` : ''}
+      ${t.note && !t.note.startsWith('Auto:') ? `<div style="font-size:11px;margin-top:8px">Note: ${esc(t.note)}</div>` : ''}
       <div style="text-align:center;font-size:11px;margin-top:12px;border-top:1px dashed #000;padding-top:6px">Thank you!</div>
     </div>`,
     `<button class="btn" onclick="closeModal(this.closest('.modal-backdrop'))">Close</button><button class="btn btn-primary" onclick="printInvoice()">🖨 Print / Save PDF</button>`);
@@ -699,17 +782,28 @@ async function renderTypeView(cfg) {
   const d = await api('/transactions?' + q);
   const meta = cfg.badge || [cfg.label || cfg.type, 'soft'];
   const isIn = cfg.neg ? false : ['sale', 'other_income', 'payment_in', 'purchase_return'].includes(cfg.type);
+  const showDue = ['sale', 'purchase'].includes(cfg.type);
+
+  const statusBadge = s => {
+    if (s === 'partial') return '<span class="badge badge-warning" style="font-size:10px">Partial</span>';
+    if (s === 'overdue') return '<span class="badge badge-danger" style="font-size:10px">Overdue</span>';
+    return '';
+  };
 
   const overdue = t => t.reminder_date && t.reminder_date < today() && ['sale', 'purchase'].includes(t.type) && t.type !== 'payment_in' && t.type !== 'payment_out';
   const rows = d.transactions.map(t => {
     const invBtn = cfg.invoiceLabel
       ? `<button class="btn btn-sm btn-ghost" onclick="viewInvoice(${t.id})">${cfg.invoiceLabel}</button>`
       : `<button class="btn btn-sm btn-ghost" onclick="viewInvoice(${t.id})">🧾</button>`;
+    const dueAmt = showDue ? (t.due_amount || 0) : 0;
+    const payStatus = showDue ? (t.payment_status || 'paid') : '';
     return `
     <tr>
       <td>${prettyDate(t.date)}</td>
-      <td><b>${esc(t.party_name || t.item_name || (t.note || '—'))}</b><div class="hint" style="color:var(--text-tertiary);font-size:11px">${esc(t.ref_no || '')}${t.item_name ? ' · ' + esc(t.item_name) : ''}</div>${t.reminder_date ? ` <span class="badge ${t.reminder_date < today() ? 'badge-danger' : 'badge-warning'}" title="Due ${prettyDate(t.reminder_date)}">⏰ ${prettyDate(t.reminder_date)}</span>` : ''}</td>
+      <td><b>${esc(t.party_name || t.item_name || (t.note || (showDue ? 'Cash Purchase' : '—')))}</b><div class="hint" style="color:var(--text-tertiary);font-size:11px">${esc(t.ref_no || '')}${t.item_name ? ' · ' + esc(t.item_name) : ''}</div>${t.reminder_date ? ` <span class="badge ${t.reminder_date < today() ? 'badge-danger' : 'badge-warning'}" title="Due ${prettyDate(t.reminder_date)}">⏰ ${prettyDate(t.reminder_date)}</span>` : ''}</td>
       <td class="amount ${isIn ? 'pos' : 'neg'}">${rs(t.amount)}</td>
+      ${showDue ? `<td class="amount" style="${dueAmt > 0 ? 'color:var(--danger)' : 'color:var(--success)'}">${dueAmt > 0 ? rs(dueAmt) : '—'}</td>` : ''}
+      ${showDue ? `<td>${statusBadge(payStatus)}</td>` : ''}
       <td>${t.discount ? rs(t.discount) : '—'}${t.vat_percent ? `<div class="hint" style="color:var(--text-tertiary);font-size:11px">VAT ${fmt(t.vat_percent)}%</div>` : ''}</td>
       <td>${t.payment_method ? esc(t.payment_method) : '—'}</td>
       <td>
@@ -723,6 +817,8 @@ async function renderTypeView(cfg) {
   const partyOpts = cfg.partyType
     ? `<option value="">All ${cfg.partyType === 'customer' ? 'customers' : 'suppliers'}</option>` + state.parties.filter(p => p.type === cfg.partyType).map(p => `<option value="${p.id}" ${String(f.party_id) === String(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
     : '';
+
+  const dueHeader = showDue ? '<th>Due</th><th>Status</th>' : '';
 
   $('view').innerHTML = `
     <div class="row spread">
@@ -740,8 +836,8 @@ async function renderTypeView(cfg) {
         <button class="btn btn-sm" onclick="resetTxnFilter()">Reset</button>
       </div>
       <div class="table-wrap">
-        <table><thead><tr><th>Date</th><th>${cfg.partyType === 'supplier' ? 'Supplier' : cfg.partyType === 'customer' ? 'Customer' : 'Details'}</th><th>Amount</th><th>Disc / VAT</th><th>Method</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="6"><div class="empty">No ${cfg.title.toLowerCase()} recorded yet</div></td></tr>`}</tbody></table>
+        <table><thead><tr><th>Date</th><th>${cfg.partyType === 'supplier' ? 'Supplier' : cfg.partyType === 'customer' ? 'Customer' : 'Details'}</th><th>Amount</th>${dueHeader}<th>Disc / VAT</th><th>Method</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${showDue ? 8 : 6}"><div class="empty">No ${cfg.title.toLowerCase()} recorded yet</div></td></tr>`}</tbody></table>
       </div>
       ${d.pages > 1 ? `<div class="row" style="justify-content:center;padding:14px">
         <button class="btn btn-sm" ${d.page <= 1 ? 'disabled' : ''} onclick="pageTxn(${d.page - 1})">← Prev</button>
@@ -932,12 +1028,17 @@ async function renderLedger() {
   const meta = { sale: ['Sale', 'success'], purchase: ['Purchase', 'info'], expense: ['Expense', 'danger'], other_income: ['Other income', 'success'], payment_in: ['Received', 'success'], payment_out: ['Paid out', 'warning'] };
   const rows = d.lines.map((l, i) => {
     const m = meta[l.type] || [l.type, 'soft'];
+    const isSalePurchase = ['sale', 'purchase'].includes(l.type);
+    const dueAmt = isSalePurchase ? (l.due_amount || 0) : 0;
+    const paidAmt = isSalePurchase ? (l.paid_amount || 0) : 0;
+    const payStatus = l.payment_status || '';
     return `<tr>
       <td>${prettyDate(l.date)}</td>
       <td><span class="badge badge-${m[1]}">${m[0]}</span></td>
       <td>${esc(l.item_name || l.note || '')}</td>
-      <td class="amount ${['sale', 'purchase'].includes(l.type) ? 'pos' : ''}">${['sale', 'purchase'].includes(l.type) ? rs(l.amount) : '—'}</td>
+      <td class="amount ${isSalePurchase ? 'pos' : ''}">${isSalePurchase ? rs(l.amount) : '—'}</td>
       <td class="amount ${['payment_in', 'payment_out'].includes(l.type) ? '' : 'neg'}">${['payment_in', 'payment_out'].includes(l.type) ? rs(l.amount) : '—'}</td>
+      ${isSalePurchase ? `<td class="amount" style="${dueAmt > 0 ? 'color:var(--danger);font-weight:700' : 'color:var(--success)'}">${dueAmt > 0 ? rs(dueAmt) : '—'}</td>` : '<td></td>'}
       <td class="amount">${rs(l.balance)}</td>
       <td><button class="btn btn-sm btn-ghost" onclick="delTxn(${l.id})">🗑</button></td>
     </tr>`;
@@ -973,8 +1074,8 @@ async function renderLedger() {
     </div>
     <div class="card card-pad mt-16">
       <div class="table-wrap"><table>
-        <thead><tr><th>Date</th><th>Type</th><th>Details</th><th>In (Rs.)</th><th>Out (Rs.)</th><th>Balance</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="7"><div class="empty">No transactions yet</div></td></tr>'}</tbody>
+        <thead><tr><th>Date</th><th>Type</th><th>Details</th><th>In (Rs.)</th><th>Out (Rs.)</th><th>Due</th><th>Balance</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="8"><div class="empty">No transactions yet</div></td></tr>'}</tbody>
       </table></div>
     </div>`;
 }

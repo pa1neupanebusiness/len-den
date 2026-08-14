@@ -209,6 +209,17 @@ if (!hasCol('transactions', 'ref_no')) db.exec("ALTER TABLE transactions ADD COL
 if (!hasCol('users', 'email')) db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''");
 if (!hasCol('users', 'google_id')) db.exec("ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''");
 if (!hasCol('accounts', 'balance')) db.exec('ALTER TABLE accounts ADD COLUMN balance REAL DEFAULT 0');
+if (!hasCol('transactions', 'paid_amount')) db.exec('ALTER TABLE transactions ADD COLUMN paid_amount REAL DEFAULT 0');
+if (!hasCol('transactions', 'due_amount')) db.exec('ALTER TABLE transactions ADD COLUMN due_amount REAL DEFAULT 0');
+if (!hasCol('transactions', 'payment_status')) db.exec("ALTER TABLE transactions ADD COLUMN payment_status TEXT DEFAULT 'paid'");
+if (!hasCol('transactions', 'linked_txn_id')) db.exec('ALTER TABLE transactions ADD COLUMN linked_txn_id INTEGER DEFAULT NULL');
+
+/* Backfill existing sale/purchase transactions with due tracking. */
+db.exec(`UPDATE transactions SET payment_status = 'paid', paid_amount = amount, due_amount = 0
+  WHERE type IN ('sale','purchase') AND (payment_status IS NULL OR payment_status = '' OR payment_status = 'paid') AND paid_amount = 0 AND due_amount = 0;`);
+db.exec(`UPDATE transactions SET paid_amount = amount, due_amount = 0, payment_status = 'paid'
+  WHERE type IN ('payment_in','payment_out','sales_return','purchase_return','expense','other_income','quotation')
+  AND (paid_amount = 0 OR paid_amount IS NULL);`);
 
 /* Backfill transaction reference numbers. */
 db.exec(`UPDATE transactions SET ref_no = (SELECT COALESCE(b.invoice_prefix,'INV') FROM businesses b WHERE b.id = transactions.business_id) || '-' || printf('%06d', transactions.id)
