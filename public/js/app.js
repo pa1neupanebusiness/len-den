@@ -681,15 +681,22 @@ function txnModal(txn) {
 window.calcDue = () => {
   const a = document.getElementById('f_amount');
   const p = document.getElementById('f_paid');
+  const discEl = document.getElementById('f_discount');
+  const vatEl = document.getElementById('f_vat');
   const t = document.getElementById('dueTotal');
   const pd = document.getElementById('duePaid');
   const db2 = document.getElementById('dueBalance');
   if (!a || !p || !t || !pd || !db2) return;
-  const amt = Number(a.value) || 0;
-  const paid = Math.min(Number(p.value) || 0, amt);
+  const net = Number(a.value) || 0;
+  const disc = Number(discEl ? discEl.value : 0) || 0;
+  const vatPct = Number(vatEl ? vatEl.value : 0) || 0;
+  const afterDisc = Math.max(0, net - disc);
+  const vatAmt = Math.round(afterDisc * vatPct) / 100;
+  const grand = Math.round((afterDisc + vatAmt) * 100) / 100;
+  const paid = Math.min(Number(p.value) || 0, grand);
   p.value = paid;
-  const due = Math.max(0, Math.round((amt - paid) * 100) / 100);
-  t.textContent = rs(amt);
+  const due = Math.max(0, Math.round((grand - paid) * 100) / 100);
+  t.textContent = rs(grand);
   pd.textContent = rs(paid);
   db2.textContent = rs(due);
 };
@@ -720,7 +727,11 @@ async function viewInvoice(id) {
   if (t.item_name) lines.push([t.item_name, fmt(t.quantity) + ' ' + t.item_unit, rs(t.rate), rs(t.amount)]);
   else if (t.party_name) lines.push([(t.note || 'Khata entry'), '', '', rs(t.amount)]);
   else lines.push([t.note || 'Entry', '', '', rs(t.amount)]);
-  const subtotal = Number(t.amount) + Number(t.discount);
+  const net = Number(t.amount) || 0;
+  const disc = Number(t.discount) || 0;
+  const afterDisc = Math.max(0, net - disc);
+  const vatAmt = t.vat_percent ? Math.round(afterDisc * t.vat_percent) / 100 : 0;
+  const grandTotal = Math.round((afterDisc + vatAmt) * 100) / 100;
   const isPartial = ['sale', 'purchase'].includes(t.type);
   const paidAmt = isPartial ? (t.paid_amount || 0) : 0;
   const dueAmt = isPartial ? (t.due_amount || 0) : 0;
@@ -745,10 +756,11 @@ async function viewInvoice(id) {
         <tbody>${lines.map(l => `<tr><td>${l[0]}</td><td style="text-align:right">${l[1]}</td><td style="text-align:right">${l[2]}</td><td style="text-align:right">${l[3]}</td></tr>`).join('')}</tbody>
       </table>
       <div style="margin-top:8px;font-size:12px">
-        <div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${rs(subtotal)}</span></div>
-        ${t.discount ? `<div style="display:flex;justify-content:space-between"><span>Discount</span><span>- ${rs(t.discount)}</span></div>` : ''}
-        ${t.vat_percent ? `<div style="display:flex;justify-content:space-between"><span>VAT ${fmt(t.vat_percent)}%</span><span>Incl.</span></div>` : ''}
-        <div style="display:flex;justify-content:space-between;font-weight:800;font-size:14px;border-top:1px solid #000;margin-top:4px;padding-top:4px"><span>Total</span><span>${rs(t.amount)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${rs(net)}</span></div>
+        ${disc ? `<div style="display:flex;justify-content:space-between"><span>Discount</span><span>- ${rs(disc)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>After Discount</span><span>${rs(afterDisc)}</span></div>` : ''}
+        ${t.vat_percent ? `<div style="display:flex;justify-content:space-between"><span>VAT ${fmt(t.vat_percent)}%</span><span>+ ${rs(vatAmt)}</span></div>` : ''}
+        <div style="display:flex;justify-content:space-between;font-weight:800;font-size:14px;border-top:1px solid #000;margin-top:4px;padding-top:4px"><span>Total</span><span>${rs(grandTotal)}</span></div>
         ${isPartial ? `
         <div style="display:flex;justify-content:space-between;color:#22a06b;margin-top:4px"><span>Paid</span><span>${rs(paidAmt)}</span></div>
         ${dueAmt > 0 ? `<div style="display:flex;justify-content:space-between;color:#e5484d;font-weight:700;margin-top:2px"><span>Balance Due</span><span>${rs(dueAmt)}</span></div>` : ''}
@@ -768,6 +780,7 @@ window.printInvoice = () => {
   const src = window.__printSource;
   if (!src) return;
   const w = window.open('', '_blank', 'width=480,height=700');
+  if (!w) return toast('Popup blocked — please allow popups for this site', 'error');
   w.document.write('<!doctype html><html><head><title>Invoice</title><style>body{font-family:Arial,sans-serif;margin:24px}#invoicePrint{max-width:380px;margin:0 auto}</style></head><body>');
   w.document.write(src.outerHTML);
   w.document.write('<script>window.onload=function(){window.print();setTimeout(function(){window.close();},800);}<\/script></body></html>');
@@ -2574,6 +2587,7 @@ async function greetParty(how) {
   } else {
     const html = greetingCardHtml(Object.assign({}, g, { msg }), party);
     const w = window.open('', '_blank', 'width=420,height=560');
+    if (!w) return toast('Popup blocked — please allow popups for this site', 'error');
     w.document.write(`<!doctype html><html><head><title>Greeting Card</title><style>body{font-family:Arial,sans-serif;margin:0;padding:24px}.greet-card{border-radius:18px;padding:26px}</style></head><body>${html}`);
     w.document.write('<script>window.onload=function(){window.print();}<\/script></body></html>');
     w.document.close();
@@ -2781,6 +2795,7 @@ function printBill(id) {
   const b = billStore().get().find(x => x.id === id);
   if (!b) return;
   const w = window.open('', '_blank', 'width=520,height=640');
+  if (!w) return toast('Popup blocked — please allow popups for this site', 'error');
   w.document.write(`<!doctype html><html><head><title>Bill</title><style>body{font-family:Arial,sans-serif;margin:0;padding:24px}img{max-width:100%}h3{color:#333}</style></head><body><h3>${esc(b.title || 'Bill')} · ${prettyDate(b.date)}</h3><img src="${b.data}" onload="window.print()"/></body></html>`);
   w.document.close();
 }
@@ -2906,6 +2921,7 @@ function bcPrint() {
   const cv = document.getElementById('bcCanvas');
   if (!cv) return;
   const w = window.open('', '_blank', 'width=520,height=300');
+  if (!w) return toast('Popup blocked — please allow popups for this site', 'error');
   w.document.write('<!doctype html><html><head><title>Barcode</title><style>body{margin:0;padding:24px;text-align:center}</style></head><body><img src="' + cv.toDataURL('image/png') + '" onload="window.print()"/></body></html>');
   w.document.close();
 }
@@ -2926,6 +2942,7 @@ function qrGen(mode) {
   const src = qr.createDataURL(6, 16);
   if (mode === 'print') {
     const w = window.open('', '_blank', 'width=420,height=480');
+    if (!w) return toast('Popup blocked — please allow popups for this site', 'error');
     w.document.write('<!doctype html><html><head><title>QR Code</title><style>body{margin:0;padding:24px;text-align:center;font-family:Arial}</style></head><body><img src="' + src + '"/><div style="margin-top:12px">' + esc(text) + '</div></body></html>');
     w.document.write('<script>window.onload=function(){window.print();}<\/script></body></html>');
     w.document.close();
