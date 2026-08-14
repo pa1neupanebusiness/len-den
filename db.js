@@ -1,11 +1,17 @@
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
 
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(path.join(DATA_DIR, 'lenden.db'));
+let db;
+try {
+  const { DatabaseSync } = require('node:sqlite');
+  db = new DatabaseSync(path.join(DATA_DIR, 'lenden.db'));
+} catch {
+  const Database = require('better-sqlite3');
+  db = new Database(path.join(DATA_DIR, 'lenden.db'));
+}
 db.exec('PRAGMA journal_mode = WAL;');
 db.exec('PRAGMA foreign_keys = ON;');
 

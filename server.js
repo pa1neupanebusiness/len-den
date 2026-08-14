@@ -1,4 +1,4 @@
-const path = require('path');
+﻿const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const { db, begin, commit, rollback, getBusiness, getUserByToken } = require('./db');
