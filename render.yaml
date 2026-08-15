@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: len-den
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
