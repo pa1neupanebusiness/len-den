@@ -1,7 +1,7 @@
 ﻿const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
-const { db, begin, commit, rollback, getBusiness, getUserByToken } = require('./db');
+const { db, initDb, begin, commit, rollback, getBusiness, getUserByToken } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1330,6 +1330,8 @@ app.post('/api/emis/:id/pay', auth(), (req, res) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'app.html')));
 app.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
 
-app.listen(PORT, () => {
-  console.log('Len Den running at http://localhost:' + PORT);
+initDb().then(() => {
+  app.listen(PORT, () => {
+    console.log('Len Den running at http://localhost:' + PORT);
+  });
 });
